@@ -15,11 +15,13 @@ Requires vLLM >= 0.17.0 (PR #33736).
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from typing import Any
 
 import torch
+from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from torch import Tensor
 from transformers import AutoConfig, AutoTokenizer
@@ -42,22 +44,48 @@ _SUPPORTED_MODEL_TYPES = {
     "deepseek_v3",
     "kimi_k2",
     "kimi_k25",
-    "minimax_m2",
-    # "step3p5" — disabled: vLLM's extract_hidden_states speculative API
-    # is not yet compatible with Step-3.5-Flash's custom architecture.
-    # Falls back to HF pipeline parallelism for Phase 1.
+    "gemma4",
+    "gemma4_text",
+    # "minimax_m2" — disabled: vLLM 0.19.1's extract_hidden_states path on
+    # MiniMax-M2 (62 layers × eagle_aux_hidden_state hooks) deadlocks after
+    # NCCL init on Blackwell PCIe (sm_120 RTX PRO 6000) — workers spin at
+    # 100% CPU / idle GPU, no weight loading. disable_custom_all_reduce=True
+    # does not help. Falls back to HF pipeline parallelism for Phase 1
+    # (1-GPU-busy, ~30 min). Re-enable when vLLM upstream fixes this
+    # (tracked in issue #33041 + related MiniMax extract_hidden_states).
+    # "step3p5" — similar incompatibility; falls back to HF PP.
 }
+
+
+def _load_text_config_data(model_id: str, trust_remote_code: bool) -> dict[str, Any]:
+    """Return text config fields even when Transformers lacks a fresh model type."""
+    try:
+        auto_cfg = AutoConfig.from_pretrained(
+            model_id,
+            trust_remote_code=trust_remote_code,
+        )
+        text_cfg = getattr(auto_cfg, "text_config", auto_cfg)
+        if hasattr(text_cfg, "to_dict"):
+            return text_cfg.to_dict()
+        return vars(text_cfg)
+    except ValueError as exc:
+        if "does not recognize this architecture" not in str(exc):
+            raise
+
+    cfg_path = hf_hub_download(model_id, "config.json")
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    text_cfg = cfg.get("text_config") or cfg
+    return text_cfg
 
 
 def is_model_supported(config: AbliterixConfig) -> bool:
     """Check if the model's architecture is in extract_hidden_states whitelist."""
     try:
-        auto_cfg = AutoConfig.from_pretrained(
-            config.model.model_id,
-            trust_remote_code=config.model.trust_remote_code or False,
+        text_cfg = _load_text_config_data(
+            config.model.model_id, config.model.trust_remote_code or False
         )
-        text_cfg = getattr(auto_cfg, "text_config", auto_cfg)
-        model_type = getattr(text_cfg, "model_type", "")
+        model_type = text_cfg.get("model_type", "")
         return model_type in _SUPPORTED_MODEL_TYPES
     except Exception:
         return False
@@ -94,6 +122,10 @@ def extract_hidden_states_vllm(
         a zero placeholder for the embedding layer; indices 1..N are decoder
         layer outputs.
     """
+    from .vllm_compat import install_gemma4_transformers_compat
+
+    install_gemma4_transformers_compat()
+
     from vllm import LLM, SamplingParams
 
     model_id = config.model.model_id
@@ -102,10 +134,10 @@ def extract_hidden_states_vllm(
         tp = torch.cuda.device_count()
     trust = config.model.trust_remote_code or False
 
-    # Get number of layers from config.
-    model_config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust)
-    text_cfg = getattr(model_config, "text_config", model_config)
-    num_layers = text_cfg.num_hidden_layers
+    # Get number of layers from config. Some newly released vLLM-supported
+    # models may not exist in the installed Transformers registry yet.
+    text_cfg = _load_text_config_data(model_id, trust)
+    num_layers = text_cfg["num_hidden_layers"]
     # Extract ALL layers.
     layer_ids = list(range(num_layers))
 
@@ -127,19 +159,24 @@ def extract_hidden_states_vllm(
     else:
         tmpdir = tempfile.mkdtemp(prefix="abliterix_hs_")
 
+    draft_hf_config = dict(text_cfg)
+    draft_hf_config["eagle_aux_hidden_state_layer_ids"] = layer_ids
+
     kwargs: dict[str, Any] = dict(
         model=model_id,
         tensor_parallel_size=tp,
         gpu_memory_utilization=config.model.gpu_memory_utilization,
         trust_remote_code=trust,
         enforce_eager=True,  # Safer for extraction
+        # Disable custom all-reduce on Blackwell PCIe (sm_120 RTX PRO 6000 etc.):
+        # NCCL inits but engine deadlocks before weight loading (vllm issue
+        # #33041). Same fix as vllm_backend.py.
+        disable_custom_all_reduce=True,
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
             "draft_model_config": {
-                "hf_config": {
-                    "eagle_aux_hidden_state_layer_ids": layer_ids,
-                },
+                "hf_config": draft_hf_config,
             },
         },
         kv_transfer_config={
@@ -172,7 +209,16 @@ def extract_hidden_states_vllm(
 
     # Tokenize prompts.  Flatten every set into a single prompt list and
     # remember each set's slice so we can split hidden states back on return.
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
+    except AttributeError as exc:
+        if "'list' object has no attribute 'keys'" not in str(exc):
+            raise
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            trust_remote_code=trust,
+            extra_special_tokens={},
+        )
     prompts: list[str] = []
     set_slices: dict[str, tuple[int, int]] = {}
     for set_name, messages in prompt_sets.items():

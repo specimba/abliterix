@@ -38,6 +38,7 @@ def test_inference_config_defaults():
     assert cfg.batch_size == 0
     assert cfg.max_batch_size == 128
     assert cfg.max_gen_tokens == 100
+    assert cfg.min_gen_tokens is None
 
 
 def test_steering_config_defaults():
@@ -90,8 +91,13 @@ def test_expert_config_defaults():
 
 
 def test_abliterix_config_loads():
-    config = AbliterixConfig()
-    assert config.model.model_id == "test/model-001"
+    old_argv = sys.argv
+    try:
+        sys.argv = ["test", "--model.model-id", "test/model-001"]
+        config = AbliterixConfig()
+        assert config.model.model_id == "test/model-001"
+    finally:
+        sys.argv = old_argv
 
 
 def test_abliterix_config_nested_types():

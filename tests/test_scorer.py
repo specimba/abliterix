@@ -7,10 +7,14 @@ The TrialScorer is constructed by bypassing __init__ (which requires a model).
 import sys
 
 import pytest
+import torch
 
 sys.argv = ["test", "--model.model-id", "dummy/model"]
 
-from abliterix.eval.scorer import TrialScorer  # noqa: E402
+from abliterix.eval.scorer import (  # noqa: E402
+    TrialScorer,
+    _safe_kl_divergence,
+)
 from abliterix.settings import AbliterixConfig  # noqa: E402
 
 
@@ -115,3 +119,32 @@ def test_length_deviation_penalty():
     )
     expected = base_div * (1.0 + 0.1 * (5.0 - 2.0))
     assert penalised_div == pytest.approx(expected)
+
+
+def test_safe_kl_divergence_handles_nonfinite_logprobs():
+    current = torch.tensor([[float("nan"), -2.0, float("-inf")]])
+    baseline = torch.log_softmax(torch.tensor([[1.0, 0.0, -1.0]]), dim=-1)
+
+    kl = _safe_kl_divergence(current, baseline)
+
+    assert kl >= 0
+    assert torch.isfinite(torch.tensor(kl))
+
+
+def test_vllm_continuation_kl_uses_nll_drift():
+    scorer = _make_scorer()
+    scorer.config.model.use_in_place_editing = True
+    scorer.benign_msgs = ["prompt-a", "prompt-b"]
+    scorer.baseline_continuations = ["base-a", "base-b"]
+    scorer.baseline_continuation_nll = torch.tensor([1.0, 2.0])
+
+    class FakeVLLM:
+        def score_continuations_nll(self, messages, continuations, adapter_path=None):
+            assert messages == scorer.benign_msgs
+            assert continuations == scorer.baseline_continuations
+            assert adapter_path == "/tmp/adapter"
+            return torch.tensor([1.25, 1.50])
+
+    kl = scorer._measure_vllm_continuation_kl(FakeVLLM(), "/tmp/adapter")
+
+    assert kl == pytest.approx(0.375)

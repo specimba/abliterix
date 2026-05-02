@@ -246,12 +246,23 @@ class SGLangGenerator:
         messages: list[ChatMessage],
         skip_special_tokens: bool = False,
         max_new_tokens: int | None = None,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> list[str]:
         prompts = self._format_prompts(messages)
         max_tok = max_new_tokens or self.config.inference.max_gen_tokens
+        min_tok = min_new_tokens
+        if min_tok is None and max_new_tokens is None:
+            min_tok = self.config.inference.min_gen_tokens
+
+        if min_tok is not None and min_tok > max_tok:
+            raise ValueError(
+                f"min_gen_tokens ({min_tok}) cannot exceed max_gen_tokens ({max_tok})"
+            )
 
         sampling_params = {"temperature": 0, "max_new_tokens": max_tok}
+        if min_tok is not None:
+            sampling_params["min_new_tokens"] = min_tok
 
         # SGLang: lora_path is a separate kwarg to generate(), not part of
         # sampling_params.  It takes adapter NAMEs (not filesystem paths),
@@ -269,12 +280,14 @@ class SGLangGenerator:
         messages: list[ChatMessage],
         skip_special_tokens: bool = False,
         max_new_tokens: int | None = None,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> list[str]:
         return self.generate_text(
             messages,
             skip_special_tokens=skip_special_tokens,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=min_new_tokens,
             adapter_path=adapter_path,
         )
 
@@ -284,6 +297,7 @@ class SGLangGenerator:
         max_new_tokens: int,
         kl_token_count: int,
         skip_special_tokens: bool = False,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> tuple[list[str], Tensor]:
         prompts = self._format_prompts(messages)
@@ -294,6 +308,13 @@ class SGLangGenerator:
             "temperature": 0,
             "max_new_tokens": max_new_tokens,
         }
+        if min_new_tokens is not None:
+            if min_new_tokens > max_new_tokens:
+                raise ValueError(
+                    f"min_gen_tokens ({min_new_tokens}) cannot exceed "
+                    f"max_gen_tokens ({max_new_tokens})"
+                )
+            sampling_params["min_new_tokens"] = min_new_tokens
 
         # SGLang: return_logprob, top_logprobs_num, lora_path are separate
         # keyword arguments to generate(), NOT part of sampling_params.
@@ -351,14 +372,16 @@ class SGLangGenerator:
         max_new_tokens: int,
         kl_token_count: int,
         skip_special_tokens: bool = False,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> tuple[list[str], Tensor]:
         return self.generate_and_score(
             messages,
-            max_new_tokens,
-            kl_token_count,
-            skip_special_tokens,
-            adapter_path,
+            max_new_tokens=max_new_tokens,
+            kl_token_count=kl_token_count,
+            skip_special_tokens=skip_special_tokens,
+            min_new_tokens=min_new_tokens,
+            adapter_path=adapter_path,
         )
 
     def compute_logprobs_batched(

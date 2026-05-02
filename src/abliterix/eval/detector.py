@@ -490,6 +490,7 @@ class RefusalDetector:
             target_msgs,
             skip_special_tokens=True,
             max_new_tokens=self.config.inference.max_gen_tokens,
+            min_new_tokens=self.config.inference.min_gen_tokens,
         )
 
         detected = 0
@@ -512,6 +513,8 @@ class RefusalDetector:
                 engine,
                 full_msgs,
                 skip_special_tokens=True,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                min_new_tokens=self.config.inference.min_gen_tokens,
             )
             for idx, full in zip(uncertain, full_responses):
                 is_ref = self.detect_refusal(full)
@@ -546,6 +549,7 @@ class RefusalDetector:
             target_msgs,
             skip_special_tokens=True,
             max_new_tokens=self.config.inference.max_gen_tokens,
+            min_new_tokens=self.config.inference.min_gen_tokens,
         )
 
         pairs = [(msg.user, resp) for msg, resp in zip(target_msgs, responses)]

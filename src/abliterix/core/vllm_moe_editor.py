@@ -1264,6 +1264,13 @@ def _project_2d(
         orig_norms = torch.linalg.vector_norm(W32, dim=1, keepdim=True)
         new_norms = torch.linalg.vector_norm(W_new, dim=1, keepdim=True).clamp(min=1e-8)
         W_new = W_new * (orig_norms / new_norms)
+    W_new = torch.nan_to_num(W_new, nan=0.0, posinf=0.0, neginf=0.0)
+    try:
+        finfo = torch.finfo(W.dtype)
+    except TypeError:
+        finfo = None
+    if finfo is not None and "float8" in str(W.dtype):
+        W_new = W_new.clamp(min=finfo.min, max=finfo.max)
     return W_new.to(W.dtype)
 
 

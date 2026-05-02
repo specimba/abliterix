@@ -778,14 +778,46 @@ def run():
             # Build projection cache.  If the HF model is loaded (needed for
             # non-speculators path), use it.  Otherwise read weights directly
             # from safetensors on disk — avoids the 3+ min HF model load.
-            print("* Building LoRA projection cache...")
-            if engine.model is not None:
+            from pathlib import Path
+
+            model_path = Path(config.model.model_id)
+            use_safetensors_cache = (
+                config.model.backend == "vllm"
+                and model_path.is_dir()
+                and (model_path / "model.safetensors.index.json").exists()
+            )
+            skip_projection_cache = config.model.disable_lora
+            if skip_projection_cache:
+                print(
+                    "* LoRA disabled: skipping projection cache "
+                    "(router-only steering)"
+                )
+                if engine.model is not None:
+                    print("* Unloading HF model...")
+                    engine.prepare_for_unload()
+                    engine.model = None
+            elif use_safetensors_cache:
+                print("* Building LoRA projection cache...")
+                # For large MoE models (MiniMax-M2: 256 experts × 62 layers),
+                # the safetensors path preserves every expert entry and avoids
+                # repeated module-tree scans while the HF model is still loaded.
+                projection_cache = ProjectionCache.build_from_safetensors(
+                    config,
+                    vectors,
+                )
+                if engine.model is not None:
+                    print("* Unloading HF model...")
+                    engine.prepare_for_unload()
+                    engine.model = None
+            elif engine.model is not None:
+                print("* Building LoRA projection cache...")
                 projection_cache = ProjectionCache.build(engine, vectors)
                 # Unload HF model to free VRAM for the TP backend.
                 print("* Unloading HF model...")
                 engine.prepare_for_unload()
                 engine.model = None
             else:
+                print("* Building LoRA projection cache...")
                 # HF model was never loaded (speculators handled everything).
                 # Build projections directly from safetensors files.
                 projection_cache = ProjectionCache.build_from_safetensors(
@@ -885,8 +917,9 @@ def run():
                     )
                     tp_gen.set_moe_editor(safety_experts)  # ty:ignore[call-non-callable]
 
-            # In-place editing path: attach expert + attention editors so the
-            # optimizer trial loop edits vLLM weights directly (no LoRA adapter).
+            # In-place editing path: attach attention and, when requested,
+            # expert editors so the optimizer trial loop edits vLLM weights
+            # directly (no LoRA adapter).
             # Requires TRITON backend (FLASHINFER_TRTLLM repacks w2_weight
             # into an opaque block layout) and enforce_eager=True. See
             # VllmConfig.use_in_place_editing for env-var requirements.
@@ -895,13 +928,14 @@ def run():
                 and config.model.use_in_place_editing
                 and hasattr(tp_gen, "set_expert_editor")
             ):
-                # Derive hidden_size + transposed flag from the HF config —
-                # engine.hf_config is populated during Phase 1 load.
+                wants_expert_editor = (
+                    "mlp.down_proj" not in config.steering.disabled_components
+                )
                 _hidden = getattr(engine, "hidden_size", None)
                 _transposed = bool(
                     getattr(engine, "_fused_down_proj_transposed", False)
                 )
-                if _hidden is None:
+                if wants_expert_editor and _hidden is None:
                     try:
                         from transformers import AutoConfig as _AC
 
@@ -918,32 +952,40 @@ def run():
                         )
                     except Exception:
                         _hidden = 0
-                if _hidden > 0:
-                    print(
-                        f"* Attaching vLLM in-place editors "
-                        f"(hidden={_hidden}, transposed={_transposed})..."
-                    )
-                    tp_gen.set_expert_editor(  # ty:ignore[call-non-callable]
-                        hidden_dim=_hidden, transposed=_transposed
-                    )
-                    tp_gen.set_attention_editor()  # ty:ignore[call-non-callable]
-                else:
-                    print(
-                        "  [yellow]use_in_place_editing=true but hidden_size "
-                        "could not be resolved — skipping in-place attach.[/]"
-                    )
+                print("* Attaching vLLM in-place attention editor...")
+                tp_gen.set_attention_editor()  # ty:ignore[call-non-callable]
+                if wants_expert_editor:
+                    if _hidden and _hidden > 0:
+                        print(
+                            f"* Attaching vLLM in-place expert editor "
+                            f"(hidden={_hidden}, transposed={_transposed})..."
+                        )
+                        tp_gen.set_expert_editor(  # ty:ignore[call-non-callable]
+                            hidden_dim=_hidden, transposed=_transposed
+                        )
+                    else:
+                        print(
+                            "  [yellow]use_in_place_editing=true but hidden_size "
+                            "could not be resolved — skipping expert editor.[/]"
+                        )
 
             # If engine has no model (lightweight mode), populate cached
             # metadata from the projection cache so optimizer can query it.
             if engine.model is None and engine._cached_n_layers is None:
-                engine._cached_n_layers = max(projection_cache.projections.keys()) + 1
-                engine._cached_components = sorted(
-                    {
-                        comp
-                        for layer in projection_cache.projections.values()
-                        for comp in layer
-                    }
-                )
+                if projection_cache is not None:
+                    engine._cached_n_layers = (
+                        max(projection_cache.projections.keys()) + 1
+                    )
+                    engine._cached_components = sorted(
+                        {
+                            comp
+                            for layer in projection_cache.projections.values()
+                            for comp in layer
+                        }
+                    )
+                else:
+                    engine._cached_n_layers = int(vectors.shape[0] - 1)
+                    engine._cached_components = []
             # If an in-place expert editor was attached, "mlp.down_proj" must
             # appear in cached_components so the optimizer generates an EGA
             # steering profile for it.  The fused expert tensor is NOT in the

@@ -12,6 +12,7 @@ provides :meth:`score_trial` to evaluate each Optuna trial.
 
 import statistics
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor
 
@@ -20,6 +21,27 @@ from ..settings import AbliterixConfig
 from ..types import ChatMessage
 from ..util import print
 from .detector import RefusalDetector
+
+
+def _finite_logprobs(logprobs: Tensor) -> Tensor:
+    """Return normalized finite log-probabilities for KL scoring."""
+    if torch.isfinite(logprobs).all():
+        return logprobs
+    cleaned = torch.nan_to_num(logprobs, nan=-30.0, posinf=0.0, neginf=-30.0)
+    return F.log_softmax(cleaned, dim=-1)
+
+
+def _safe_kl_divergence(current_logprobs: Tensor, baseline_logprobs: Tensor) -> float:
+    """Compute finite KL even when a damaged trial emits NaN/Inf logits."""
+    kl = F.kl_div(
+        _finite_logprobs(current_logprobs),
+        _finite_logprobs(baseline_logprobs),
+        reduction="batchmean",
+        log_target=True,
+    ).item()
+    if torch.isfinite(torch.tensor(kl)):
+        return float(kl)
+    return float("inf")
 
 
 class TrialScorer:
@@ -94,16 +116,29 @@ class TrialScorer:
                     max_new_tokens=self.config.inference.max_gen_tokens,
                     kl_token_count=self.config.kl.token_count,
                     skip_special_tokens=True,
+                    min_new_tokens=self.config.inference.min_gen_tokens,
                     adapter_path=None,
                 )
             )
+            if self._supports_vllm_continuation_kl(vllm_gen):
+                self.baseline_continuations = base_responses
+                print("* Scoring baseline continuations for vLLM in-place KL...")
+                self.baseline_continuation_nll = vllm_gen.score_continuations_nll(
+                    self.benign_msgs,
+                    self.baseline_continuations,
+                    adapter_path=None,
+                )
         else:
             base_responses, self.baseline_logprobs = engine.generate_and_score_batched(
                 self.benign_msgs,
                 max_new_tokens=self.config.inference.max_gen_tokens,
                 kl_token_count=self.config.kl.token_count,
                 skip_special_tokens=True,
+                min_new_tokens=self.config.inference.min_gen_tokens,
             )
+        if not hasattr(self, "baseline_continuations"):
+            self.baseline_continuations = None
+            self.baseline_continuation_nll = None
         base_lengths = [len(r.split()) for r in base_responses]
         self.baseline_mean_length = (
             statistics.mean(base_lengths) if base_lengths else 1.0
@@ -135,6 +170,10 @@ class TrialScorer:
         print("  * Obtaining probability distributions...")
         vllm_gen = getattr(engine, "_vllm_gen", None)
         adapter_path = getattr(engine, "_current_adapter_path", None)
+        if self._use_vllm_continuation_kl(vllm_gen):
+            kl = self._measure_vllm_continuation_kl(vllm_gen, adapter_path)
+            print(f"  * KL divergence: [bold]{kl:.4f}[/] (continuation NLL)")
+            return kl
         if vllm_gen is not None:
             logprobs = vllm_gen.compute_logprobs_batched(
                 self.benign_msgs,
@@ -142,12 +181,7 @@ class TrialScorer:
             )
         else:
             logprobs = engine.compute_logprobs_batched(self.benign_msgs)
-        kl = F.kl_div(
-            logprobs,
-            self.baseline_logprobs,
-            reduction="batchmean",
-            log_target=True,
-        ).item()
+        kl = _safe_kl_divergence(logprobs, self.baseline_logprobs)
         print(f"  * KL divergence: [bold]{kl:.4f}[/]")
         return kl
 
@@ -164,12 +198,16 @@ class TrialScorer:
             responses = vllm_gen.generate_text_batched(
                 self.benign_msgs,
                 skip_special_tokens=True,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                min_new_tokens=self.config.inference.min_gen_tokens,
                 adapter_path=adapter_path,
             )
         else:
             responses = engine.generate_text_batched(
                 self.benign_msgs,
                 skip_special_tokens=True,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                min_new_tokens=self.config.inference.min_gen_tokens,
             )
         lengths = [len(r.split()) for r in responses]
         if not lengths or self.baseline_stdev_length == 0:
@@ -197,6 +235,7 @@ class TrialScorer:
                 max_new_tokens=self.config.inference.max_gen_tokens,
                 kl_token_count=self.config.kl.token_count,
                 skip_special_tokens=True,
+                min_new_tokens=self.config.inference.min_gen_tokens,
                 adapter_path=adapter_path,
             )
         else:
@@ -205,15 +244,15 @@ class TrialScorer:
                 max_new_tokens=self.config.inference.max_gen_tokens,
                 kl_token_count=self.config.kl.token_count,
                 skip_special_tokens=True,
+                min_new_tokens=self.config.inference.min_gen_tokens,
             )
 
-        kl = F.kl_div(
-            logprobs,
-            self.baseline_logprobs,
-            reduction="batchmean",
-            log_target=True,
-        ).item()
-        print(f"  * KL divergence: [bold]{kl:.4f}[/]")
+        if self._use_vllm_continuation_kl(vllm_gen):
+            kl = self._measure_vllm_continuation_kl(vllm_gen, adapter_path)
+            print(f"  * KL divergence: [bold]{kl:.4f}[/] (continuation NLL)")
+        else:
+            kl = _safe_kl_divergence(logprobs, self.baseline_logprobs)
+            print(f"  * KL divergence: [bold]{kl:.4f}[/]")
 
         lengths = [len(r.split()) for r in responses]
         if not lengths or self.baseline_stdev_length == 0:
@@ -227,6 +266,39 @@ class TrialScorer:
         print(f"  * Response length deviation: [bold]{deviation:.2f}[/] std devs")
 
         return kl, deviation
+
+    def _use_vllm_continuation_kl(self, vllm_gen) -> bool:
+        """Use fixed-continuation NLL drift for vLLM in-place edits.
+
+        Sparse top-k sampler KL is known to read as exactly zero on Gemma 4
+        vLLM in-place runs even when refusal counts move.  This path keeps the
+        ordinary KL estimator for HF/LoRA/SGLang and only swaps the metric for
+        the edit mode affected by stale sampler logprobs.
+        """
+        return bool(
+            self._supports_vllm_continuation_kl(vllm_gen)
+            and getattr(self, "baseline_continuations", None) is not None
+            and getattr(self, "baseline_continuation_nll", None) is not None
+        )
+
+    def _supports_vllm_continuation_kl(self, vllm_gen) -> bool:
+        return bool(
+            vllm_gen is not None
+            and getattr(self.config.model, "use_in_place_editing", False)
+            and hasattr(vllm_gen, "score_continuations_nll")
+        )
+
+    def _measure_vllm_continuation_kl(self, vllm_gen, adapter_path: str | None) -> float:
+        current_nll = vllm_gen.score_continuations_nll(
+            self.benign_msgs,
+            self.baseline_continuations,
+            adapter_path=adapter_path,
+        )
+        baseline_nll = self.baseline_continuation_nll.to(current_nll.device)
+        drift = torch.mean(torch.abs(current_nll - baseline_nll)).item()
+        if torch.isfinite(torch.tensor(drift)):
+            return float(drift)
+        return float("inf")
 
     # ------------------------------------------------------------------
     # Multi-objective scoring

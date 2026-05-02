@@ -132,6 +132,15 @@ def load_tokenizer(
             model_id,
             trust_remote_code=trust_remote_code,
         )
+    except AttributeError as exc:
+        if "'list' object has no attribute 'keys'" not in str(exc):
+            raise
+
+        return AutoTokenizer.from_pretrained(
+            model_id,
+            trust_remote_code=trust_remote_code,
+            extra_special_tokens={},
+        )
     except ValueError as exc:
         if "TokenizersBackend" not in str(exc):
             raise
@@ -417,7 +426,12 @@ class SteeringEngine:
         # NOTE: FP8 dequant is now applied inside the dtype loop (above),
         # before the smoke-test, so we no longer need it here.
 
-        self._init_adapters()
+        if config.model.backend in ("vllm", "sglang"):
+            print("* TP backend: skipping HF LoRA adapter initialisation")
+            self._lora_b_weights = []
+            self.peft_config = None  # ty:ignore[assignment]
+        else:
+            self._init_adapters()
         self._init_expert_routing()
 
         if config.model.use_torch_compile:
@@ -1257,11 +1271,21 @@ class SteeringEngine:
         min_new_tokens: int | None = None,
     ) -> list[str]:
         """Generate responses for a batch of chat messages."""
+        resolved_max = max_new_tokens or self.config.inference.max_gen_tokens
+        resolved_min = min_new_tokens
+        if resolved_min is None and max_new_tokens is None:
+            resolved_min = self.config.inference.min_gen_tokens
+
         gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": max_new_tokens or self.config.inference.max_gen_tokens,
+            "max_new_tokens": resolved_max,
         }
-        if min_new_tokens is not None:
-            gen_kwargs["min_new_tokens"] = min_new_tokens
+        if resolved_min is not None:
+            if resolved_min > resolved_max:
+                raise ValueError(
+                    f"min_gen_tokens ({resolved_min}) cannot exceed "
+                    f"max_gen_tokens ({resolved_max})"
+                )
+            gen_kwargs["min_new_tokens"] = resolved_min
         inputs, outputs = self._generate(messages, **gen_kwargs)
         return self.tokenizer.batch_decode(
             outputs[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
@@ -1294,6 +1318,7 @@ class SteeringEngine:
         max_new_tokens: int,
         kl_token_count: int,
         skip_special_tokens: bool = False,
+        min_new_tokens: int | None = None,
     ) -> tuple[list[str], Tensor]:
         """Generate full responses AND capture early-token logprobs in one pass.
 
@@ -1302,11 +1327,19 @@ class SteeringEngine:
         """
         sampler = _LogitsSampler(kl_token_count)
 
-        inputs, outputs = self._generate(
-            messages,
-            max_new_tokens=max_new_tokens,
-            logits_processor=[sampler],
-        )
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "logits_processor": [sampler],
+        }
+        if min_new_tokens is not None:
+            if min_new_tokens > max_new_tokens:
+                raise ValueError(
+                    f"min_gen_tokens ({min_new_tokens}) cannot exceed "
+                    f"max_gen_tokens ({max_new_tokens})"
+                )
+            gen_kwargs["min_new_tokens"] = min_new_tokens
+
+        inputs, outputs = self._generate(messages, **gen_kwargs)
 
         actual_n = min(kl_token_count, len(sampler.scores))
         if actual_n == 1:
@@ -1331,6 +1364,7 @@ class SteeringEngine:
         max_new_tokens: int,
         kl_token_count: int,
         skip_special_tokens: bool = False,
+        min_new_tokens: int | None = None,
     ) -> tuple[list[str], Tensor]:
         """Batched wrapper around :meth:`generate_and_score`."""
         all_resp: list[str] = []
@@ -1338,9 +1372,10 @@ class SteeringEngine:
         for batch in chunk_batches(messages, self.config.inference.batch_size):
             resp, lp = self.generate_and_score(
                 batch,
-                max_new_tokens,
-                kl_token_count,
-                skip_special_tokens,
+                max_new_tokens=max_new_tokens,
+                kl_token_count=kl_token_count,
+                skip_special_tokens=skip_special_tokens,
+                min_new_tokens=min_new_tokens,
             )
             all_resp.extend(resp)
             all_lp.append(lp)

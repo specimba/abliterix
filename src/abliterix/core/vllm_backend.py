@@ -31,6 +31,7 @@ The abliteration pipeline splits into two phases:
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -59,6 +60,10 @@ class VLLMGenerator:
     """
 
     def __init__(self, config: AbliterixConfig):
+        from .vllm_compat import install_gemma4_transformers_compat
+
+        install_gemma4_transformers_compat()
+
         from vllm import LLM, SamplingParams  # noqa: F811
 
         self.config = config
@@ -100,6 +105,16 @@ class VLLMGenerator:
             # PunicaWrapper" on visual.* modules. Harmless for pure text
             # models — the unused modality keys are silently ignored.
             limit_mm_per_prompt={"image": 0, "video": 0, "audio": 0},
+            # Disable vLLM custom all-reduce kernel. On Blackwell PCIe GPUs
+            # (RTX PRO 6000, sm_120) without NVLink, the custom-AR path deadlocks
+            # during worker init — NCCL connects successfully but the engine
+            # never advances to weight loading (workers spin at 100% CPU / idle
+            # GPU indefinitely). See vllm issue #33041 and forum post "vLLM
+            # hangs during worker initialization on Blackwell PCIe GPUs unless
+            # --disable-custom-all-reduce is used". Harmless on NVLink hardware
+            # (NCCL AllReduce remains efficient); small perf loss on PCIe but
+            # necessary to make the run progress at all.
+            disable_custom_all_reduce=True,
             # NOTE: chunked_prefill is always ON in vLLM V1 (>= 0.8) and
             # cannot be disabled.  We don't pass enable_chunked_prefill.
             # Disable prefix caching when in-place editors are active.  Even
@@ -176,6 +191,7 @@ class VLLMGenerator:
 
         self.llm = LLM(**kwargs)
         self.tokenizer = self.llm.get_tokenizer()
+        self._ensure_chat_template(model_id, trust)
 
         # Adapter management — use tmpfs (/dev/shm) to avoid disk I/O overhead
         # during per-trial LoRA hot-swap.  Falls back to /tmp if /dev/shm is
@@ -382,8 +398,39 @@ class VLLMGenerator:
     # Chat template formatting
     # ------------------------------------------------------------------
 
+    def _ensure_chat_template(self, model_id: str, trust_remote_code: bool) -> None:
+        """Copy the HF chat template when vLLM's tokenizer wrapper omits it."""
+        if getattr(self.tokenizer, "chat_template", None):
+            return
+        try:
+            from transformers import AutoTokenizer
+
+            hf_tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                trust_remote_code=trust_remote_code,
+            )
+        except Exception:
+            return
+
+        chat_template = getattr(hf_tokenizer, "chat_template", None)
+        if chat_template:
+            try:
+                self.tokenizer.chat_template = chat_template
+            except Exception:
+                pass
+
+    @staticmethod
+    def _format_prompt_without_template(msg: ChatMessage) -> str:
+        """Plain text fallback for tokenizers that do not expose chat_template."""
+        if msg.system:
+            return f"{msg.system.strip()}\n\nUser: {msg.user}\nAssistant:"
+        return f"User: {msg.user}\nAssistant:"
+
     def _format_prompt(self, msg: ChatMessage) -> str:
         """Format a ChatMessage into a prompt string using the tokenizer's chat template."""
+        if not getattr(self.tokenizer, "chat_template", None):
+            return self._format_prompt_without_template(msg)
+
         messages: list[dict[str, str]] = []
         if msg.system:
             messages.append({"role": "system", "content": msg.system})
@@ -400,7 +447,15 @@ class VLLMGenerator:
                 **kwargs,
             )
         except TypeError:
-            return self.tokenizer.apply_chat_template(messages, **kwargs)
+            try:
+                return self.tokenizer.apply_chat_template(messages, **kwargs)
+            except ValueError as exc:
+                if "chat_template" not in str(exc) and "chat template" not in str(exc):
+                    raise
+        except ValueError as exc:
+            if "chat_template" not in str(exc) and "chat template" not in str(exc):
+                raise
+        return self._format_prompt_without_template(msg)
 
     def _format_prompts(self, messages: list[ChatMessage]) -> list[str]:
         return [self._format_prompt(m) for m in messages]
@@ -494,16 +549,29 @@ class VLLMGenerator:
         messages: list[ChatMessage],
         skip_special_tokens: bool = False,
         max_new_tokens: int | None = None,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> list[str]:
         """Generate responses using vLLM with optional LoRA adapter."""
         prompts = self._format_prompts(messages)
         max_tok = max_new_tokens or self.config.inference.max_gen_tokens
+        min_tok = min_new_tokens
+        if min_tok is None and max_new_tokens is None:
+            min_tok = self.config.inference.min_gen_tokens
 
-        params = self._SamplingParams(
-            temperature=0.0,
-            max_tokens=max_tok,
-        )
+        if min_tok is not None and min_tok > max_tok:
+            raise ValueError(
+                f"min_gen_tokens ({min_tok}) cannot exceed max_gen_tokens ({max_tok})"
+            )
+
+        sampling_kwargs: dict[str, Any] = {
+            "temperature": 0.0,
+            "max_tokens": max_tok,
+        }
+        if min_tok is not None:
+            sampling_kwargs["min_tokens"] = min_tok
+
+        params = self._SamplingParams(**sampling_kwargs)
 
         lora_req = None
         if adapter_path and not self._lora_disabled:
@@ -532,6 +600,7 @@ class VLLMGenerator:
         messages: list[ChatMessage],
         skip_special_tokens: bool = False,
         max_new_tokens: int | None = None,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> list[str]:
         """Batch generation — vLLM handles batching internally via continuous batching."""
@@ -541,6 +610,7 @@ class VLLMGenerator:
             messages,
             skip_special_tokens=skip_special_tokens,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=min_new_tokens,
             adapter_path=adapter_path,
         )
 
@@ -550,6 +620,7 @@ class VLLMGenerator:
         max_new_tokens: int,
         kl_token_count: int,
         skip_special_tokens: bool = False,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> tuple[list[str], Tensor]:
         """Generate responses AND capture logprobs for KL divergence.
@@ -573,15 +644,24 @@ class VLLMGenerator:
 
         k_logprobs = 100
 
-        params = self._SamplingParams(
-            temperature=0.0,
-            max_tokens=max_new_tokens,
-            logprobs=k_logprobs,
+        sampling_kwargs: dict[str, Any] = {
+            "temperature": 0.0,
+            "max_tokens": max_new_tokens,
+            "logprobs": k_logprobs,
             # Capture next-token distribution at every prompt position so we
             # can read prompt_logprobs[-1] as the KL signal.  Sampler
             # logprobs in V1 can read stale across in-place weight edits.
-            prompt_logprobs=k_logprobs,
-        )
+            "prompt_logprobs": k_logprobs,
+        }
+        if min_new_tokens is not None:
+            if min_new_tokens > max_new_tokens:
+                raise ValueError(
+                    f"min_gen_tokens ({min_new_tokens}) cannot exceed "
+                    f"max_gen_tokens ({max_new_tokens})"
+                )
+            sampling_kwargs["min_tokens"] = min_new_tokens
+
+        params = self._SamplingParams(**sampling_kwargs)
 
         lora_req = None
         if adapter_path and not self._lora_disabled:
@@ -602,6 +682,22 @@ class VLLMGenerator:
         import math
 
         uniform_lp = math.log(1.0 / vocab_size)
+
+        def _safe_sparse_logprobs(sparse_lps: dict[int, Any]) -> Tensor:
+            step_vec = torch.full((vocab_size,), -30.0)
+            found_finite = False
+            for token_id, logprob_obj in sparse_lps.items():
+                lp = float(logprob_obj.logprob)
+                if not math.isfinite(lp):
+                    continue
+                step_vec[int(token_id)] = lp
+                found_finite = True
+            if not found_finite:
+                return torch.full((vocab_size,), uniform_lp)
+            log_vec = F.log_softmax(step_vec, dim=0)
+            if not torch.isfinite(log_vec).all():
+                return torch.full((vocab_size,), uniform_lp)
+            return log_vec
 
         for out in outputs:
             responses.append(out.outputs[0].text)
@@ -626,18 +722,12 @@ class VLLMGenerator:
                     continue
                 per_step: list[Tensor] = []
                 for step_lps in token_lps[:n_tokens]:
-                    step_vec = torch.full((vocab_size,), -30.0)
-                    for token_id, logprob_obj in step_lps.items():
-                        step_vec[token_id] = logprob_obj.logprob
-                    per_step.append(F.log_softmax(step_vec, dim=0))
+                    per_step.append(_safe_sparse_logprobs(step_lps))
                 all_logprobs.append(torch.stack(per_step).mean(dim=0))
                 continue
 
             # Build sparse log-softmax vector from prompt_logprobs[-1].
-            step_vec = torch.full((vocab_size,), -30.0)
-            for token_id, logprob_obj in sparse_lps.items():
-                step_vec[token_id] = logprob_obj.logprob
-            all_logprobs.append(F.log_softmax(step_vec, dim=0))
+            all_logprobs.append(_safe_sparse_logprobs(sparse_lps))
 
         return responses, torch.stack(all_logprobs)
 
@@ -647,15 +737,17 @@ class VLLMGenerator:
         max_new_tokens: int,
         kl_token_count: int,
         skip_special_tokens: bool = False,
+        min_new_tokens: int | None = None,
         adapter_path: str | None = None,
     ) -> tuple[list[str], Tensor]:
         """Batched wrapper — vLLM handles batching natively."""
         return self.generate_and_score(
             messages,
-            max_new_tokens,
-            kl_token_count,
-            skip_special_tokens,
-            adapter_path,
+            max_new_tokens=max_new_tokens,
+            kl_token_count=kl_token_count,
+            skip_special_tokens=skip_special_tokens,
+            min_new_tokens=min_new_tokens,
+            adapter_path=adapter_path,
         )
 
     def compute_logprobs_batched(
@@ -674,6 +766,93 @@ class VLLMGenerator:
             adapter_path=adapter_path,
         )
         return logprobs
+
+    def score_continuations_nll(
+        self,
+        messages: list[ChatMessage],
+        continuations: list[str],
+        adapter_path: str | None = None,
+    ) -> Tensor:
+        """Score fixed continuations with a fresh prefill pass.
+
+        vLLM V1 sampler logprobs can stay effectively unchanged after
+        ``collective_rpc`` in-place edits, which made Gemma 4 31B report
+        KL=0.0000 even when generations changed.  Prompt logprobs are computed
+        during prefill, so scoring a fixed baseline continuation gives a
+        reliable damage signal for in-place runs.
+
+        Returns mean negative log-likelihood per continuation token, shape
+        ``(batch,)``.  Missing token logprobs are floored at 30 nats, which is
+        conservative and finite for heavily damaged trials.
+        """
+        if len(messages) != len(continuations):
+            raise ValueError(
+                "messages and continuations must have the same length "
+                f"({len(messages)} != {len(continuations)})"
+            )
+
+        prompts = self._format_prompts(messages)
+        full_prompts = [p + c for p, c in zip(prompts, continuations)]
+
+        prompt_lens: list[int] = []
+        for prompt in prompts:
+            try:
+                token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+            except TypeError:
+                token_ids = self.tokenizer.encode(prompt)
+            prompt_lens.append(len(token_ids))
+
+        params = self._SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            prompt_logprobs=100,
+        )
+
+        lora_req = None
+        if adapter_path and not self._lora_disabled:
+            from vllm.lora.request import LoRARequest
+
+            lora_req = LoRARequest(
+                f"steering_{self._adapter_id}",
+                self._adapter_id,
+                adapter_path,
+            )
+
+        outputs = self.llm.generate(full_prompts, params, lora_request=lora_req)
+
+        nlls: list[Tensor] = []
+        for out, prompt_len in zip(outputs, prompt_lens):
+            prompt_token_ids = list(getattr(out, "prompt_token_ids", None) or [])
+            prompt_logprobs = list(getattr(out, "prompt_logprobs", None) or [])
+            if not prompt_token_ids or not prompt_logprobs:
+                nlls.append(torch.tensor(30.0))
+                continue
+
+            start = min(max(prompt_len, 1), len(prompt_token_ids))
+            losses: list[float] = []
+            for idx in range(start, len(prompt_token_ids)):
+                if idx >= len(prompt_logprobs):
+                    break
+                entry = prompt_logprobs[idx]
+                if not entry:
+                    continue
+                token_id = int(prompt_token_ids[idx])
+                lp_obj = entry.get(token_id)
+                if lp_obj is None:
+                    losses.append(30.0)
+                    continue
+                lp = float(lp_obj.logprob)
+                if not math.isfinite(lp):
+                    losses.append(30.0)
+                    continue
+                losses.append(max(-lp, 0.0))
+
+            if losses:
+                nlls.append(torch.tensor(sum(losses) / len(losses)))
+            else:
+                nlls.append(torch.tensor(30.0))
+
+        return torch.stack(nlls)
 
 
 class ProjectionCache:
@@ -717,7 +896,7 @@ class ProjectionCache:
 
         cache = ProjectionCache()
         cache.steering_vectors = steering_vectors.cpu()
-        sv = steering_vectors
+        sv = cache.steering_vectors
 
         model_id = config.model.model_id
         trust = config.model.trust_remote_code or False
@@ -822,6 +1001,13 @@ class ProjectionCache:
             ),
         ]
 
+        disabled_components = set(config.steering.disabled_components)
+        # Zero-LoRA companions are only needed when mlp.down_proj is active.
+        # If a profile disables expert/down steering, skip w1/w3 entirely so
+        # attention-only configs do not build a huge MoE adapter shell.
+        _ZERO_COMPANION_COMPONENTS = {"moe.expert_gate", "moe.expert_up"}
+        include_zero_companions = "mlp.down_proj" not in disabled_components
+
         # Group steerable keys by (layer_idx, component).
         steerable_keys: dict[int, dict[str, list[str]]] = {}
         compiled = [(re.compile(p), comp) for p, comp in _STEERABLE_PATTERNS]
@@ -830,6 +1016,13 @@ class ProjectionCache:
             for regex, component in compiled:
                 m = regex.match(key)
                 if m:
+                    if component in disabled_components:
+                        break
+                    if (
+                        component in _ZERO_COMPANION_COMPONENTS
+                        and not include_zero_companions
+                    ):
+                        break
                     layer_idx = int(m.group(1))
                     if layer_idx < n_layers:
                         steerable_keys.setdefault(layer_idx, {}).setdefault(
@@ -848,10 +1041,6 @@ class ProjectionCache:
                     str(model_dir / shard), framework="pt", device="cpu"
                 )
             return _open_files[shard].get_tensor(key)
-
-        # Components that are zero-LoRA companions — no real steering, just
-        # shape tracking for pack_moe satisfaction.
-        _ZERO_COMPANION_COMPONENTS = {"moe.expert_gate", "moe.expert_up"}
 
         for layer_idx in sorted(steerable_keys):
             cache.projections[layer_idx] = {}
@@ -991,10 +1180,30 @@ class ProjectionCache:
             )
 
         cache.target_modules = sorted(target_module_names)
-        n_cached = sum(len(v) for v in cache.projections.values())
+
+        def _cache_entry_count(info: dict[str, Any]) -> int:
+            if "experts" in info:
+                return len(info["experts"])
+            if "companions" in info:
+                return len(info["companions"])
+            return 1
+
+        def _cache_entry_nbytes(info: dict[str, Any]) -> int:
+            if "vW_all" in info:
+                return info["vW_all"].nbytes
+            if "experts" in info:
+                return sum(e["vW_all"].nbytes for e in info["experts"])
+            # Zero-LoRA companions store shape metadata only.
+            return 0
+
+        n_cached = sum(
+            _cache_entry_count(info)
+            for layer in cache.projections.values()
+            for info in layer.values()
+        )
         cache_mb = (
             sum(
-                info["vW_all"].nbytes
+                _cache_entry_nbytes(info)
                 for layer in cache.projections.values()
                 for info in layer.values()
             )
@@ -1064,7 +1273,8 @@ class ProjectionCache:
                     # NOTE: we do NOT cache dequantised weights — for MoE models
                     # with 256 experts × 62 layers, caching all float32 weights
                     # on GPU causes OOM.  Instead, dequant → project → free.
-                    base_weight = cast(Tensor, mod.base_layer.weight)
+                    base_layer = getattr(mod, "base_layer", mod)
+                    base_weight = cast(Tensor, base_layer.weight)
                     qs = getattr(base_weight, "quant_state", None)
                     CB = getattr(base_weight, "CB", None)
 
@@ -1080,7 +1290,7 @@ class ProjectionCache:
                         SCB = base_weight.SCB
                         W = CB.float() * SCB.float().unsqueeze(1) / 127.0
                     elif _FP8_DTYPES and base_weight.dtype in _FP8_DTYPES:
-                        weight_scale = getattr(mod.base_layer, "weight_scale", None)
+                        weight_scale = getattr(base_layer, "weight_scale", None)
                         if weight_scale is not None:
                             W = _dequantize_fp8_blockwise(
                                 base_weight.data, weight_scale

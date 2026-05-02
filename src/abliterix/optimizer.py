@@ -194,10 +194,10 @@ def run_search(
 
         # In-place editing path: direct weight edits on TP workers via
         # collective_rpc. Takes precedence over the LoRA adapter path when
-        # both editors are attached (see cli.py setup block).
+        # an attention editor is attached (expert editor is optional for
+        # attention-only profiles).
         _in_place_mode = (
             vllm_gen is not None
-            and getattr(vllm_gen, "expert_editor", None) is not None
             and getattr(vllm_gen, "attention_editor", None) is not None
         )
 
@@ -206,16 +206,25 @@ def run_search(
 
             # Resolve n_layers + hidden_dim from the attention editor's
             # probe, falling back to config.
+            _expert_editor = getattr(vllm_gen, "expert_editor", None)
+            _expert_layers = (
+                _expert_editor._moe_layers if _expert_editor is not None else set()
+            )
             _probe_layers = sorted(
-                vllm_gen.attention_editor._attn_layers
-                | vllm_gen.expert_editor._moe_layers
+                vllm_gen.attention_editor._attn_layers | _expert_layers
             )
             _n_layers = (_probe_layers[-1] + 1) if _probe_layers else 0
             if _n_layers == 0:
                 # Probe failed — fall back to cached metadata.
                 _n_layers = engine._cached_n_layers or 0
-            _hidden = vllm_gen.expert_editor.hidden_dim
-            _transposed = vllm_gen.expert_editor.transposed
+            _hidden = (
+                _expert_editor.hidden_dim
+                if _expert_editor is not None
+                else int(steering_vectors.shape[-1])
+            )
+            _transposed = (
+                _expert_editor.transposed if _expert_editor is not None else False
+            )
 
             print("* Applying steering (vLLM in-place)...")
             _ip_result = apply_steering_vllm_inplace(
@@ -240,7 +249,9 @@ def run_search(
                     f"ega: applied={_ip_result['ega'].get('applied', 0)}, "
                     f"router rows modified={_ip_result['router_touched']}"
                 )
-        elif vllm_gen is not None and proj_cache is not None:
+        elif vllm_gen is not None and (
+            proj_cache is not None or getattr(vllm_gen, "_lora_disabled", False)
+        ):
             if getattr(vllm_gen, "_lora_disabled", False):
                 # vLLM loaded without LoRA (e.g. MXFP4 + driver 570 Marlin-FP4
                 # PTX issue).  Skip the per-trial adapter build entirely —

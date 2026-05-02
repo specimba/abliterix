@@ -288,6 +288,16 @@ class InferenceConfig(BaseModel):
         description="Token budget for each generated response.",
     )
 
+    min_gen_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Optional minimum number of generated tokens for evaluation runs. "
+            "Set this below or equal to max_gen_tokens when delayed refusals, "
+            "early stop-token spam, or truncated benign answers need to be "
+            "visible to the refusal judge. None preserves model-default stopping."
+        ),
+    )
+
 
 class SteeringConfig(BaseModel):
     """Hyper-parameters for the steering (abliteration) algorithm."""
