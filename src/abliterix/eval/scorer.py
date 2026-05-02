@@ -288,7 +288,9 @@ class TrialScorer:
             and hasattr(vllm_gen, "score_continuations_nll")
         )
 
-    def _measure_vllm_continuation_kl(self, vllm_gen, adapter_path: str | None) -> float:
+    def _measure_vllm_continuation_kl(
+        self, vllm_gen, adapter_path: str | None
+    ) -> float:
         current_nll = vllm_gen.score_continuations_nll(
             self.benign_msgs,
             self.baseline_continuations,

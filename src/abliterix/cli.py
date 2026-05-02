@@ -789,8 +789,7 @@ def run():
             skip_projection_cache = config.model.disable_lora
             if skip_projection_cache:
                 print(
-                    "* LoRA disabled: skipping projection cache "
-                    "(router-only steering)"
+                    "* LoRA disabled: skipping projection cache (router-only steering)"
                 )
                 if engine.model is not None:
                     print("* Unloading HF model...")
