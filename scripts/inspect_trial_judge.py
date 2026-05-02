@@ -19,7 +19,6 @@ response. Ends with summary + list of only the "refused" indices for quick
 false-positive review.
 """
 import argparse
-import gc
 import os
 import sys
 
@@ -125,6 +124,7 @@ def main():
         eval_prompts,
         skip_special_tokens=True,
         max_new_tokens=config.inference.max_gen_tokens,
+        min_new_tokens=config.inference.min_gen_tokens,
     )
 
     detector = RefusalDetector(config)

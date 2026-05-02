@@ -15,6 +15,37 @@ Abliterix loads config in priority order (later overrides earlier):
 
 Run `abliterix --help` for all options.
 
+### Inference Evaluation Bounds
+
+`[inference].max_gen_tokens` controls the response budget for evaluation.
+`[inference].min_gen_tokens` is optional; set it when you need refusal and
+over-refusal judges to see delayed refusals, premature stop-token output, or
+truncated benign answers. Leave it unset for normal interactive generation.
+
+### vLLM-First Large-Model Runs
+
+For large models, prefer `backend = "vllm"` and keep generation/evaluation on
+vLLM. HuggingFace should only be used for one-time hidden-state extraction when
+the vLLM/speculators fast path is unavailable, or for final safetensors export.
+Do not use HF `generate()` for optimization loops on large models.
+
+For Gemma 4 31B specifically, the known-good route is vLLM in-place direct
+editing:
+
+```toml
+[model]
+backend = "vllm"
+disable_lora = true
+use_in_place_editing = true
+enforce_eager = true
+
+[steering]
+steering_mode = "direct"
+disabled_components = ["mlp.down_proj"]
+```
+
+See [vllm.md](vllm.md) for the full runbook and the trial-40 lessons learned.
+
 **150+ pre-built configs** in [`configs/`](../configs/) — a selection:
 
 | Config | Target |

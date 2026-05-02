@@ -67,9 +67,9 @@ a model's stop token fires before 100 new tokens, generation continues
 (via `min_new_tokens`) and the resulting filler is fed to the degenerate
 filter — which correctly classifies stop-token spam as a refusal.
 
-`generate_text_batched()` already plumbs `min_new_tokens` through to
-`model.generate()` ([engine.py:1189-1190](../src/abliterix/core/engine.py#L1189-L1190)),
-so no engine change is required.
+`configs/honest_bench.toml` sets both `max_gen_tokens = 150` and
+`min_gen_tokens = 100`; `generate_text_batched()` plumbs that floor through
+to each backend's generation call.
 
 ---
 

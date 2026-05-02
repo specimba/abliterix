@@ -3,8 +3,12 @@
 #
 # Prereqs on the pod:
 #   - 4× RTX PRO 6000 (96GB each, 384GB total)
-#   - ≥500GB disk on /workspace (FP8 model ~230GB + HF cache + hidden states)
-#   - Repo synced to /workspace/abliterix (scp -r from your laptop)
+#   - Container /root or other overlay disk ≥ 300GB (FP8 model ~230GB + HF cache
+#     + hidden states + checkpoints). On RunPod the network volume (/workspace)
+#     is a quota-limited MooseFS share (often 20-100 GB); the container overlay
+#     at / is typically 1 TB+ and is where HF cache should live.
+#   - Repo synced to /workspace/abliterix (scp -r from your laptop) — the repo
+#     itself is tiny (~30 MB) so /workspace is fine for code.
 #   - .env in /workspace/abliterix/.env with HF_TOKEN + OPENROUTER_API_KEY
 #
 # Usage on the pod:
@@ -26,9 +30,9 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/workspace/abliterix}"
 CONFIG="${CONFIG:-configs/minimax_m2.7_vllm.toml}"
-LOG_FILE="${LOG_FILE:-/workspace/run_minimax_m2_7.log}"
-HF_CACHE="${HF_CACHE:-/workspace/hf_cache}"
-HS_DIR="${HS_DIR:-/workspace/abliterix_hidden_states}"
+LOG_FILE="${LOG_FILE:-/root/run_minimax_m2_7.log}"
+HF_CACHE="${HF_CACHE:-/root/hf_cache}"
+HS_DIR="${HS_DIR:-/root/abliterix_hidden_states}"
 MIN_HF_SPEED="${MIN_HF_SPEED:-50}"    # MB/s floor; override for slow regions
 
 cd "$REPO_DIR"
@@ -133,18 +137,56 @@ pip uninstall -y --break-system-packages flash-attn 2>/dev/null || true
 python3 -c "import torch, transformers, peft, vllm; \
   print(f'torch={torch.__version__} transformers={transformers.__version__} peft={peft.__version__} vllm={vllm.__version__} gpus={torch.cuda.device_count()}')"
 
-# ─── 5. Directories + env exports ────────────────────────────────────────────
-mkdir -p "$HF_CACHE" "$HS_DIR"
+# ─── 5. Pre-download model ───────────────────────────────────────────────────
+# vLLM's internal model loader is 5-10× slower than `hf download --max-workers 16`
+# per pitfall 11 in minimax_m27_deploy_lessons.md. At 230 GB this is the
+# difference between ~40 min and ~6 hours. Skip if already cached.
+mkdir -p "$HF_CACHE"
 export HF_HOME="$HF_CACHE"
 export HF_HUB_ENABLE_HF_TRANSFER=1
-# Route vLLM's ExampleHiddenStatesConnector writes to /workspace (1 TB+) so
-# they don't fill the 20 GB container /tmp overlay during Phase 1.
+
+MODEL_DIR="$HF_CACHE/hub/models--MiniMaxAI--MiniMax-M2.7"
+if [ -d "$MODEL_DIR" ] && [ "$(du -sBG "$MODEL_DIR" 2>/dev/null | awk '{print $1+0}')" -ge 220 ]; then
+  echo "=== Model already cached at $MODEL_DIR (>= 220 GB), skipping download ==="
+else
+  echo "=== Pre-downloading MiniMax-M2.7 (230 GB) ==="
+  hf download MiniMaxAI/MiniMax-M2.7 --max-workers 16
+fi
+
+# ─── 6. Directories + env exports ────────────────────────────────────────────
+mkdir -p "$HS_DIR"
+# Route vLLM's ExampleHiddenStatesConnector writes to /root (1 TB overlay disk,
+# NOT the quota-limited /workspace volume) — hidden-state shards are 20-80 GB.
 export AX_HIDDEN_STATES_DIR="$HS_DIR"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # DeepGEMM fused MoE kernel can be flaky on Blackwell + vLLM 0.19 — disable
 # to force the standard triton FusedMoE path. Re-enable if benchmarks prove
 # DeepGEMM stable on your exact pod image.
 export VLLM_MOE_USE_DEEP_GEMM=0
+# Required for abliterix MoE editing under vLLM TP — WITHOUT THESE, every
+# trial silently reports KL=0.0000 and 100/100 refusals (see memory
+# minimax_m27_env_var_fix.md for the full failure-mode analysis).
+#   spawn: Pitfall 4 in minimax_m27_deploy_lessons.md — avoids
+#     `Cannot re-initialize CUDA in forked subprocess` on TP worker boot.
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   pickle on collective_rpc: VLLMMoEEditor sends Python callables to workers
+#     for per-trial router-weight edits; default msgpack can't serialize fns.
+export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+#   force TRITON MoE backend for BOTH FP16/BF16 and FP8. FlashInfer TRTLLM
+#     (default) repacks w2_weight into an opaque layout that silently swallows
+#     in-place edits (RFC #31848) and has is_monolithic=True which Fused MoE
+#     LoRA rejects with an assert. CUTLASS FP8 MoE grouped-GEMM crashes with
+#     "status=7" on SM120 RTX PRO 6000 Blackwell — FP4 and FP8 paths alike
+#     (vllm issues #26211, #32826, #33333; SGLang #18870 confirms TRITON is
+#     the only working FP8 MoE backend on SM120). Without _FP8=0, worker
+#     init hangs at 100% CPU / idle GPU for 20+ min before failing or
+#     looping indefinitely.
+export VLLM_USE_FLASHINFER_MOE_FP16=0
+export VLLM_USE_FLASHINFER_MOE_FP8=0
+export VLLM_USE_FLASHINFER_MOE_FP4=0
+#   flashinfer version check: after any `pip install -U transformers`, the
+#     bundled flashinfer version bump trips a hard check at import time.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 # Inform vLLM NCCL we're on PCIe (no NVLink) — reduces wasted discovery time
 # and avoids intermittent P2P bring-up stalls on split-root-complex pods.
 export NCCL_P2P_LEVEL=SYS
@@ -170,9 +212,16 @@ echo "  tail -f $LOG_FILE"
 echo "  nvidia-smi dmon -s u -c 30     # <-- all 4 cards should be 70-95% during BOTH phases"
 echo "  du -sh $HF_CACHE/hub/models--MiniMaxAI--MiniMax-M2.7"
 echo
-echo "Verify TP is active (expect these log lines during Phase 1):"
-echo "  'Fast hidden state extraction (vLLM native TP)'"
-echo "  'Loading model in vLLM with TP=4 for hidden state extraction'"
+echo "Expected behaviour:"
+echo "  - Phase 1 (~30 min): HF pipeline-parallel — 1 GPU busy, 3 idle. This is"
+echo "    unavoidable on vLLM 0.19.0 because MiniMaxM2ForCausalLM lacks the"
+echo "    SupportsEagle3 mixin (pitfall 1 in minimax_m27_deploy_lessons.md)."
+echo "  - Phase 2 (2-4 h, 50 trials): vLLM TP=4, all 4 GPUs 70-95% util."
 echo
-echo "If you instead see 'Falling back to HF pipeline parallelism', STOP the run"
-echo "and paste the preceding exception — Phase 1 will otherwise waste 3 idle GPUs."
+echo "Sanity checks for Phase 2 (first trial log line):"
+echo "  [VLLMMoEEditor] Router suppression: n_suppress=X ... N rows modified"
+echo "  [Trial 0] ... KL=0.04xx ...       <-- non-zero proves edits reach forward"
+echo
+echo "If trial KL stays exactly 0.0000 AND refusals are 100/100, the problem is"
+echo "one of four env vars missing. Run: env | grep -E 'VLLM_|FLASHINFER_'"
+echo "All FOUR must be set (minimax_m27_env_var_fix.md)."

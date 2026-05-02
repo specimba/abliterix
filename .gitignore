@@ -62,6 +62,8 @@ checkpoints*/
 
 # Experiment outputs (generated at runtime)
 experiments*/
+/artifacts/
+/results/
 
 # HonestAbliterationBench: track the spec, the contributing guide, the
 # result JSONs that build the leaderboard, and the auto-generated

@@ -65,6 +65,7 @@ def main():
         eval_msgs,
         skip_special_tokens=True,
         max_new_tokens=config.inference.max_gen_tokens,
+        min_new_tokens=config.inference.min_gen_tokens,
     )
 
     print(f"\nSending all {len(responses)} responses to LLM judge...")

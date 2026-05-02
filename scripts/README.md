@@ -49,8 +49,49 @@ python scripts/eval_model.py \
   --model wangzhang/Qwen3.5-35B-A3B-abliterated \
   --config configs/qwen3.5_35b.toml \
   --batch-size 8 \
-  --judge
+  --judge \
+  --eval-set both
 ```
+
+Use `--eval-set benign` when tuning for lower benign over-refusal without
+running the target refusal set.
+
+### `eval_local_refusal.py` - local Mac/server refusal evaluation
+
+Evaluates the last 200 `datasets/harmful_1000` prompts (`train[800:1000]`)
+against a local model and records every response plus its refusal/compliance
+label. This is the preferred script for checking a published abliterated model
+on a MacBook or a local OpenAI-compatible server without running the Abliterix
+optimization engine.
+
+```bash
+# One-time minimal Mac env; avoids syncing CUDA-only bitsandbytes.
+python3 -m venv .venv-mac
+source .venv-mac/bin/activate
+python -m pip install -U pip
+python -m pip install torch transformers datasets pydantic-settings rich accelerate huggingface-hub
+
+# Full HF checkpoint on Apple Silicon / MPS
+PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 \
+python scripts/eval_local_refusal.py \
+  --backend transformers \
+  --model wangzhang/Qwen3.6-27B-abliterated-v2 \
+  --config configs/qwen3.6_27b_v2.toml \
+  --split 'train[800:1000]' \
+  --batch-size 1 \
+  --dtype float16
+
+# Local llama.cpp / MLX / LM Studio / Ollama OpenAI-compatible endpoint
+python scripts/eval_local_refusal.py \
+  --backend openai \
+  --model qwen3.6-27b-abliterated-v2 \
+  --base-url http://127.0.0.1:8080/v1 \
+  --config configs/qwen3.6_27b_v2.toml
+```
+
+By default the script uses the configured Abliterix LLM judge. Set
+`OPENROUTER_API_KEY` for the default OpenRouter judge, or pass `--no-judge`
+for a faster keyword-only count. Results are written to `artifacts/`.
 
 ### `test_trial.py` - trial comparison test
 

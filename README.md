@@ -85,7 +85,7 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 | [**gpt-oss-120b**](https://huggingface.co/wangzhang/gpt-oss-120b-abliterated) | **26/100 (26%)** | **5.4e-06** | 100 | Direct + EGA + Router + vLLM-TP |
 | [**Gemma-4-E4B**](https://huggingface.co/wangzhang/gemma-4-E4B-it-abliterated) | **7/100 (7%)** | **0.0006** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-E2B**](https://huggingface.co/wangzhang/gemma-4-E2B-it-abliterated) | **9/100 (9%)** | **0.0004** | 100 | Direct + Q/K/V/O |
-| [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **18/100 (18%)** | **0.0007** | 20 | Direct + Q/K/V/O |
+| [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **3/100 (3%)** | **0.0012** | 120 | SRA + Direct |
 | [LFM2-24B-A2B](https://huggingface.co/wangzhang/LFM2-24B-A2B-abliterated) | **0/100 (0%)** | 0.0079 | 50 | LoRA |
 | [GLM-4.7-Flash](https://huggingface.co/wangzhang/GLM-4.7-Flash-abliterated) | 1/100 (1%) | 0.0133 | 50 | LoRA |
 | [Devstral-Small-2-24B](https://huggingface.co/wangzhang/Devstral-Small-2-24B-Instruct-abliterated) | 3/100 (3%) | 0.0086 | 50 | LoRA |

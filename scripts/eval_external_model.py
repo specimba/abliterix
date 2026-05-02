@@ -75,7 +75,6 @@ def main():
     # --- Load our eval datasets ---
     from abliterix.settings import AbliterixConfig
     from abliterix.eval.detector import RefusalDetector
-    from abliterix.types import ChatMessage
     from abliterix.data import load_prompt_dataset
 
     config = AbliterixConfig(config=args.config)
@@ -97,20 +96,30 @@ def main():
             {"role": "system", "content": msg_system or DEFAULT_SYSTEM},
             {"role": "user", "content": msg_user},
         ]
-        return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        template_kwargs = {"add_generation_prompt": True, "tokenize": False}
+        try:
+            return tokenizer.apply_chat_template(
+                messages,
+                enable_thinking=False,
+                **template_kwargs,
+            )
+        except TypeError:
+            return tokenizer.apply_chat_template(messages, **template_kwargs)
 
     def generate_batched(prompts: list[str], max_new_tokens: int) -> list[str]:
         responses: list[str] = []
         for start in range(0, len(prompts), args.batch_size):
             chunk = prompts[start : start + args.batch_size]
             enc = tokenizer(chunk, return_tensors="pt", padding=True, truncation=False).to(model.device)
+            gen_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "pad_token_id": tokenizer.pad_token_id,
+            }
+            if config.inference.min_gen_tokens is not None:
+                gen_kwargs["min_new_tokens"] = config.inference.min_gen_tokens
             with torch.no_grad():
-                out = model.generate(
-                    **enc,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=tokenizer.pad_token_id,
-                )
+                out = model.generate(**enc, **gen_kwargs)
             gen = out[:, enc["input_ids"].shape[1]:]
             responses.extend(tokenizer.batch_decode(gen, skip_special_tokens=True))
         return responses

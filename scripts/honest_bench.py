@@ -142,6 +142,19 @@ def _make_engine(model_id: str, device_map: str, trust_remote_code: bool):
                     config.inference.batch_size = 2
             else:
                 config.inference.batch_size = 1
+
+        if config.inference.max_gen_tokens != SPEC_MAX_NEW_TOKENS:
+            raise SystemExit(
+                "Frozen bench config drifted: "
+                f"max_gen_tokens={config.inference.max_gen_tokens}, "
+                f"expected {SPEC_MAX_NEW_TOKENS}"
+            )
+        if config.inference.min_gen_tokens != SPEC_MIN_NEW_TOKENS:
+            raise SystemExit(
+                "Frozen bench config drifted: "
+                f"min_gen_tokens={config.inference.min_gen_tokens}, "
+                f"expected {SPEC_MIN_NEW_TOKENS}"
+            )
         engine = SteeringEngine(config)
     finally:
         sys.argv = saved_argv
@@ -186,8 +199,8 @@ def _generate_responses(engine, msgs) -> list[str]:
     return engine.generate_text_batched(
         msgs,
         skip_special_tokens=True,
-        max_new_tokens=SPEC_MAX_NEW_TOKENS,
-        min_new_tokens=SPEC_MIN_NEW_TOKENS,
+        max_new_tokens=engine.config.inference.max_gen_tokens,
+        min_new_tokens=engine.config.inference.min_gen_tokens,
     )
 
 
@@ -357,7 +370,6 @@ def main() -> int:  # noqa: PLR0915 — top-level orchestration is intentionally
     _free_engine(base_engine, base_cfg_path)
 
     # 4. KL divergence (target || base).
-    import torch  # noqa: WPS433
     import torch.nn.functional as F  # noqa: WPS433
 
     kl_vs_base = float(
