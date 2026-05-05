@@ -6,9 +6,9 @@
 
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     CliSettingsSource,
@@ -17,7 +17,29 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from .types import (
+# vLLM 0.20.x's MoEBackend literal — mirrored here so abliterix can reject
+# typos at config-load time without importing vLLM. Update alongside vLLM
+# upgrades. Canonical source: vllm/config/kernel.py:MoEBackend.
+MoEBackend = Literal[
+    "auto",
+    "triton",
+    "deep_gemm",
+    "deep_gemm_mega_moe",
+    "cutlass",
+    "flashinfer_trtllm",
+    "flashinfer_cutlass",
+    "flashinfer_cutedsl",
+    "marlin",
+    "aiter",
+    "emulation",
+]
+
+# CompileMode is owned by vllm_compilation_config; settings re-uses the
+# same Literal so a typo (e.g. "eagar") is caught at config-load instead
+# of inside vllm_compilation_config.build().
+from .core.vllm_compilation_config import CompileMode  # noqa: E402
+
+from .types import (  # noqa: E402
     DecayKernel,
     PromptSource,
     QuantMode,
@@ -232,10 +254,10 @@ class ModelConfig(BaseModel):
             "    adapter covers attention only.\n"
             "  * No adapter serialisation overhead (~200 MB / trial saved).\n"
             "  * 3x GPU util on TP vs HF pipeline-parallel.\n"
-            "Caller must also export ``VLLM_FUSED_MOE_UNQUANTIZED_BACKEND="
-            "triton`` + ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` before engine "
-            "load — FLASHINFER_TRTLLM backend repacks w2_weight into an "
-            "opaque block layout that in-place writes miss."
+            "Backend selection is now config-driven via ``moe_backend``; "
+            "abliterix sets ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` "
+            "automatically when this flag is on so ``collective_rpc`` can "
+            "pickle the Python callables sent to TP workers."
         ),
     )
 
@@ -268,6 +290,137 @@ class ModelConfig(BaseModel):
             "{num_nextn_predict_layers = 1} to downgrade MTP-3 to MTP-1."
         ),
     )
+
+    # ------------------------------------------------------------------
+    # vLLM 0.18-0.20.x integration knobs (added by PRD #20)
+    # ------------------------------------------------------------------
+
+    attention_backend: str | None = Field(
+        default=None,
+        description=(
+            "vLLM attention backend name passed as "
+            "``attention_config={'backend': ...}`` in the LLM() kwargs.  "
+            "None (default) lets abliterix auto-detect: MLA models "
+            "(DeepSeek-V2/V3, MiniMax-M2.x) get ``FLASH_ATTN_MLA``, "
+            "sink-attention models (gpt-oss) get ``TRITON_ATTN``, and the "
+            "remainder fall through to vLLM's own default.  Set explicitly "
+            "to override (e.g. ``'FLASHMLA'``, ``'TRITON_MLA'``, "
+            "``'FLASH_ATTN'``, ``'FLASHINFER'``)."
+        ),
+    )
+
+    moe_backend: MoEBackend = Field(
+        default="triton",
+        description=(
+            "vLLM MoE compute backend (``KernelConfig.moe_backend``).  "
+            "Default ``'triton'`` skips FlashInfer's per-expert-group "
+            "cutlass JIT compile that costs ~30 minutes on first sm_90 "
+            "cold start.  Set to ``'flashinfer_cutlass'`` if you want the "
+            "perf and have already paid the JIT.  Other options: "
+            "``'auto'``, ``'deep_gemm'``, ``'cutlass'``, ``'flashinfer_trtllm'``, "
+            "``'marlin'``, ``'aiter'``.  Replaces the now-deprecated "
+            "``VLLM_FUSED_MOE_UNQUANTIZED_BACKEND`` env var (gone in 0.20.x)."
+        ),
+    )
+
+    disable_custom_all_reduce: bool | None = Field(
+        default=None,
+        description=(
+            "Pass-through for vLLM's ``disable_custom_all_reduce``.  "
+            "None (default) auto-detects: ``True`` on Blackwell PCIe "
+            "(sm_120) where the custom all-reduce path deadlocks during "
+            "worker init without NVLink, ``False`` everywhere else "
+            "(NVLink Hopper / SXM Blackwell keep the perf win).  Set "
+            "explicitly to override the auto-detection."
+        ),
+    )
+
+    limit_mm_per_prompt: Dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Pass-through for vLLM's ``limit_mm_per_prompt``.  None "
+            "(default) drops vision/audio towers via "
+            "``{'image': 0, 'video': 0, 'audio': 0}`` so the Punica LoRA "
+            "wrapper accepts hybrid VLM/MoE architectures (Qwen3.5-MoE-VL, "
+            "Llama-4, Step3, Mistral-3) without crashing on ``visual.*`` "
+            "modules.  Set explicitly when you want vision/audio active."
+        ),
+    )
+
+    vllm_max_loras: int = Field(
+        default=1,
+        description=(
+            "vLLM ``max_loras`` — number of LoRA adapter slots held in CPU "
+            "for hot-swap.  Default 1 keeps the historical single-adapter "
+            "behaviour.  Raising this (e.g. 8) lets the optimizer pool "
+            "multiple trial adapters and skip per-trial /dev/shm "
+            "write+reload, which dominates wall time on long sweeps."
+        ),
+    )
+
+    vllm_max_lora_rank: int | None = Field(
+        default=None,
+        description=(
+            "vLLM ``max_lora_rank``.  None (default) lets vLLM use its own "
+            "default (16 in 0.20.x).  Set to the smallest value that fits "
+            "every adapter you plan to load — abliterix used to force-pad "
+            "to 8, but vLLM accepts arbitrary ranks now."
+        ),
+    )
+
+    lora_target_modules: list[str] | None = Field(
+        default=None,
+        description=(
+            "vLLM ``--lora-target-modules`` (PR #34984, v0.19.0+).  When "
+            "set, restricts LoRA wrapping to module suffixes in this list "
+            "(e.g. ``['o_proj', 'qkv_proj']``).  Primarily a perf knob; "
+            "experimentally also a possible workaround for the LoRA + "
+            "Expert Parallel worker assertion crash by keeping LoRA off "
+            "MoE modules.  None = vLLM default (wrap all supported "
+            "modules)."
+        ),
+    )
+
+    vllm_compile_mode: CompileMode = Field(
+        default="eager",
+        description=(
+            "abliterix-side selector for vLLM's ``compilation_config``.\n"
+            "  'eager'                 — equivalent to ``enforce_eager=True``; "
+            "all CUDA graphs off (current behaviour, safest for MoE editor "
+            "forward hooks).\n"
+            "  'moe_eager_rest_compile' — REJECTED until GPU smoke lands "
+            "(PRD #20 Out of Scope). Use 'eager' for now; this mode raises "
+            "at config load to avoid silent fallback noise on every engine "
+            "init.\n"
+            "  'full_compile'          — full vLLM compile + CUDA graphs "
+            "everywhere (no MoE editing supported; dense models only)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_vllm_combos(self) -> "ModelConfig":
+        """Reject vLLM config combinations that would either silently
+        no-op or contradict each other."""
+        # Item 4 from PR review: until the post-load attach lands, fail
+        # loudly on the unimplemented compile mode rather than warn-and-
+        # fallback every engine init (which spams logs across sweeps).
+        if self.vllm_compile_mode == "moe_eager_rest_compile":
+            raise ValueError(
+                "vllm_compile_mode='moe_eager_rest_compile' is not yet "
+                "implemented — the post-load layer-index discovery is "
+                "deferred per PRD #20 Out of Scope. Use 'eager' until the "
+                "GPU smoke for static_all_moe_layers ships."
+            )
+        # Item 8: lora_target_modules without enable_lora is silently dropped
+        # by the if-not-disabled guard in vllm_backend. Reject explicitly so
+        # users see the misconfiguration at config load.
+        if self.disable_lora and self.lora_target_modules:
+            raise ValueError(
+                "lora_target_modules is set but disable_lora=True — the "
+                "target list would be silently dropped because LoRA is off. "
+                "Either unset lora_target_modules or set disable_lora=false."
+            )
+        return self
 
 
 class InferenceConfig(BaseModel):
