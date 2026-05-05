@@ -86,7 +86,9 @@ def check_gpus(min_vram: float) -> None:
     for i in range(n):
         cc = torch.cuda.get_device_capability(i)
         if cc < (8, 0):
-            _warn(f"GPU{i} SM{cc[0]}.{cc[1]} < SM80 — BF16 may fall back to FP32 emulation")
+            _warn(
+                f"GPU{i} SM{cc[0]}.{cc[1]} < SM80 — BF16 may fall back to FP32 emulation"
+            )
         else:
             _ok(f"GPU{i} supports native BF16 (SM{cc[0]}.{cc[1]})")
 
@@ -139,7 +141,9 @@ def inspect_config(model_id: str) -> dict:
         "intermediate_size": getattr(text_cfg, "intermediate_size", None),
         "num_attention_heads": getattr(text_cfg, "num_attention_heads", None),
         "num_key_value_heads": getattr(text_cfg, "num_key_value_heads", None),
-        "num_experts": getattr(text_cfg, "num_experts", getattr(text_cfg, "num_local_experts", None)),
+        "num_experts": getattr(
+            text_cfg, "num_experts", getattr(text_cfg, "num_local_experts", None)
+        ),
         "num_experts_per_tok": getattr(text_cfg, "num_experts_per_tok", None),
         "has_vision": hasattr(config, "vision_config"),
         "has_audio": hasattr(config, "audio_config"),
@@ -160,7 +164,9 @@ def inspect_config(model_id: str) -> dict:
 
     n_experts = info["num_experts"]
     if n_experts:
-        _ok(f"MoE model: {n_experts} experts, {info['num_experts_per_tok']} active per token")
+        _ok(
+            f"MoE model: {n_experts} experts, {info['num_experts_per_tok']} active per token"
+        )
     else:
         _ok("dense model (no MoE)")
 
@@ -207,9 +213,17 @@ def check_engine_compatibility(model_id: str, model_info: dict) -> None:
     if not torch.cuda.is_available():
         _fail("CUDA required for --with-weights model load")
 
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoTokenizer,
+    )
 
-    ModelClass = AutoModelForImageTextToText if model_info["has_vision"] else AutoModelForCausalLM
+    ModelClass = (
+        AutoModelForImageTextToText
+        if model_info["has_vision"]
+        else AutoModelForCausalLM
+    )
 
     print(f"  Loading model via {ModelClass.__name__} in BF16...")
     model = ModelClass.from_pretrained(
@@ -274,7 +288,9 @@ def check_engine_compatibility(model_id: str, model_info: dict) -> None:
     # MoE check
     if model_info["num_experts"]:
         router = getattr(block, "router", None) or getattr(block, "gate", None)
-        experts = getattr(block, "experts", None) or getattr(getattr(block, "mlp", None), "experts", None)
+        experts = getattr(block, "experts", None) or getattr(
+            getattr(block, "mlp", None), "experts", None
+        )
         if router:
             _ok(f"router found: {type(router).__name__}")
         else:
@@ -293,12 +309,16 @@ def check_engine_compatibility(model_id: str, model_info: dict) -> None:
     print("  Running quick generation test...")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     messages = [{"role": "user", "content": "What is 2+2? Reply in one word."}]
-    text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    text = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model.generate(**inputs, max_new_tokens=20, do_sample=False)
-    response = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-    print(f"  Q: What is 2+2?")
+    response = tokenizer.decode(
+        out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
+    )
+    print("  Q: What is 2+2?")
     print(f"  A: {response.strip()}")
     _ok("generation works")
 
@@ -314,8 +334,12 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--model", required=True, help="HF model ID or local path")
-    parser.add_argument("--min-vram", type=float, default=16, help="Minimum VRAM in GiB (default: 16)")
-    parser.add_argument("--min-disk", type=float, default=30, help="Minimum disk in GiB (default: 30)")
+    parser.add_argument(
+        "--min-vram", type=float, default=16, help="Minimum VRAM in GiB (default: 16)"
+    )
+    parser.add_argument(
+        "--min-disk", type=float, default=30, help="Minimum disk in GiB (default: 30)"
+    )
     parser.add_argument(
         "--with-weights",
         action="store_true",

@@ -269,10 +269,10 @@ def test_lora_rank1_reconstruction():
     [
         ((4096, 4096), 4096, False),  # attn.o_proj on symmetric head geometry
         ((4096, 1024), 4096, False),  # mlp.down_proj (hidden, expert_dim)
-        ((512, 4096), 4096, True),    # MoE router.weight — num_experts rows
-        ((1024, 4096), 4096, True),   # k_proj / v_proj under GQA (8 heads × 128)
-        ((3072, 4096), 4096, True),   # q_proj where num_heads*head_dim ≠ hidden
-        ((4096, 4096), 3072, True),   # dimension-mismatched steering vector
+        ((512, 4096), 4096, True),  # MoE router.weight — num_experts rows
+        ((1024, 4096), 4096, True),  # k_proj / v_proj under GQA (8 heads × 128)
+        ((3072, 4096), 4096, True),  # q_proj where num_heads*head_dim ≠ hidden
+        ((4096, 4096), 3072, True),  # dimension-mismatched steering vector
     ],
 )
 def test_shape_guard_skip_decision(w_shape, v_dim, should_skip):

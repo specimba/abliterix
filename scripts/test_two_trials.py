@@ -105,7 +105,8 @@ def main():
     flush_memory()
 
     messages = [
-        ChatMessage(system="You are a helpful assistant.", user=p) for p in DEFAULT_PROMPTS
+        ChatMessage(system="You are a helpful assistant.", user=p)
+        for p in DEFAULT_PROMPTS
     ]
 
     SEP = "=" * 60

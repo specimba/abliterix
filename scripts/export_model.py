@@ -19,19 +19,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--model", required=True, help="Base HF model ID")
     parser.add_argument("--checkpoint", required=True, help="Optuna checkpoint dir")
-    parser.add_argument("--trial", type=int, required=True, help="Trial number to export")
+    parser.add_argument(
+        "--trial", type=int, required=True, help="Trial number to export"
+    )
     parser.add_argument("--config", required=True, help="Config TOML path")
-    parser.add_argument("--push-to", default=None, help="HF repo to push to (omit to skip upload)")
-    parser.add_argument("--save-local", default=None, help="Also save locally to this path")
+    parser.add_argument(
+        "--push-to", default=None, help="HF repo to push to (omit to skip upload)"
+    )
+    parser.add_argument(
+        "--save-local", default=None, help="Also save locally to this path"
+    )
     args = parser.parse_args()
 
     os.environ["AX_CONFIG"] = args.config
-    sys.argv = [sys.argv[0], "--model.model-id", args.model, "--inference.batch-size", "4"]
+    sys.argv = [
+        sys.argv[0],
+        "--model.model-id",
+        args.model,
+        "--inference.batch-size",
+        "4",
+    ]
 
     import torch
+
     torch.set_grad_enabled(False)
 
     from abliterix.scriptlib import load_trial, extract_trial_params, setup_io
@@ -62,7 +77,8 @@ def main():
     benign_states = engine.extract_hidden_states_batched(benign)
     target_states = engine.extract_hidden_states_batched(target)
     vectors = compute_steering_vectors(
-        benign_states, target_states,
+        benign_states,
+        target_states,
         config.steering.vector_method,
         config.steering.orthogonal_projection,
         winsorize=config.steering.winsorize_vectors,
@@ -83,8 +99,13 @@ def main():
     # Apply steering
     print("Applying steering (direct weight editing)...")
     apply_steering(
-        engine, vectors, direction_index, parameters, config,
-        safety_experts=safety_experts, routing_config=routing,
+        engine,
+        vectors,
+        direction_index,
+        parameters,
+        config,
+        safety_experts=safety_experts,
+        routing_config=routing,
     )
     print("Steering applied.")
 
@@ -92,6 +113,7 @@ def main():
     # Direct steering modifies base weights in-place, but PEFT wrapper
     # still wraps them. merge_and_unload() returns the clean base model.
     from peft import PeftModel
+
     model = engine.model
     if isinstance(model, PeftModel):
         print("Merging LoRA adapters and unwrapping PEFT...")
@@ -110,6 +132,7 @@ def main():
 
     # Push to HuggingFace
     from huggingface_hub import HfApi
+
     api = HfApi()
     print(f"Pushing to {args.push_to}...")
     api.create_repo(args.push_to, exist_ok=True, repo_type="model")

@@ -57,11 +57,19 @@ def main() -> int:
     ap.add_argument("--model", default="wangzhang/gpt-oss-20b-abliterated")
     ap.add_argument("--prompt", default="Write a haiku about a fox.")
     ap.add_argument("--max-tokens", type=int, default=64)
-    ap.add_argument("--strength", type=float, default=8.0,
-                    help="Projection strength — higher = bigger output change.")
+    ap.add_argument(
+        "--strength",
+        type=float,
+        default=8.0,
+        help="Projection strength — higher = bigger output change.",
+    )
     ap.add_argument("--max-gpu-memory", type=float, default=0.85)
-    ap.add_argument("--transposed", action="store_true", default=True,
-                    help="gpt-oss stores w2_weight transposed (default: True).")
+    ap.add_argument(
+        "--transposed",
+        action="store_true",
+        default=True,
+        help="gpt-oss stores w2_weight transposed (default: True).",
+    )
     ap.add_argument("--hidden-dim", type=int, default=2880)
     args = ap.parse_args()
 
@@ -73,12 +81,12 @@ def main() -> int:
         model=args.model,
         tensor_parallel_size=1,
         dtype="bfloat16",
-        enforce_eager=True,               # required for in-place edits to be visible
+        enforce_eager=True,  # required for in-place edits to be visible
         gpu_memory_utilization=args.max_gpu_memory,
         max_model_len=1024,
         trust_remote_code=True,
     )
-    print(f"      Loaded in {time.time()-t0:.1f}s")
+    print(f"      Loaded in {time.time() - t0:.1f}s")
 
     # Greedy sampling — deterministic, ideal for equality check.
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_tokens)
@@ -129,8 +137,7 @@ def main() -> int:
         for idx in sorted(editor._moe_layers)
     ]
 
-    print(f"\n[4/6] Applying EGA projection (strength={args.strength}, "
-          f"unit random v)…")
+    print(f"\n[4/6] Applying EGA projection (strength={args.strength}, unit random v)…")
     t1 = time.time()
     result = editor.apply_ega(plan, norm_preserve=True)
     # Also flush prefix cache so KV entries from baseline don't leak.
@@ -138,8 +145,10 @@ def main() -> int:
         llm.reset_prefix_cache()
     except Exception:
         pass
-    print(f"      apply_ega: applied={result['applied']} / {n_layers}, "
-          f"errors={len(result.get('errors', []))}, time={time.time()-t1:.2f}s")
+    print(
+        f"      apply_ega: applied={result['applied']} / {n_layers}, "
+        f"errors={len(result.get('errors', []))}, time={time.time() - t1:.2f}s"
+    )
     if result["errors"]:
         for e in result["errors"][:5]:
             print(f"        ! {e}")
@@ -150,15 +159,18 @@ def main() -> int:
     edited_a = _gen("edited-a")
     edited_b = _gen("edited-b")
     if edited_a != edited_b:
-        print("⚠  Edited output non-deterministic — unexpected under greedy "
-              "but not necessarily a bug (may be numeric noise).")
+        print(
+            "⚠  Edited output non-deterministic — unexpected under greedy "
+            "but not necessarily a bug (may be numeric noise)."
+        )
     if edited_a == baseline_a:
-        print("❌ Edit did not change generation — in-place write is NOT "
-              "reaching the kernel. This is the classic FLASHINFER_TRTLLM "
-              "repack bug. Confirm VLLM_FUSED_MOE_UNQUANTIZED_BACKEND=triton.")
+        print(
+            "❌ Edit did not change generation — in-place write is NOT "
+            "reaching the kernel. This is the classic FLASHINFER_TRTLLM "
+            "repack bug. Confirm VLLM_FUSED_MOE_UNQUANTIZED_BACKEND=triton."
+        )
         return 1
-    print("      ✓ Output changed after edit — the projection IS reaching "
-          "the kernel.")
+    print("      ✓ Output changed after edit — the projection IS reaching the kernel.")
 
     # ------------------------------------------------------------------
     # Step 4: restore → output should match baseline byte-for-byte
@@ -170,7 +182,7 @@ def main() -> int:
         llm.reset_prefix_cache()
     except Exception:
         pass
-    print(f"      restored {n_restored} layer(s) in {time.time()-t2:.2f}s")
+    print(f"      restored {n_restored} layer(s) in {time.time() - t2:.2f}s")
 
     restored_a = _gen("restored-a")
     if restored_a != baseline_a:
@@ -191,8 +203,10 @@ def main() -> int:
         pass
     edited_c = _gen("edited-c")
     if edited_c != edited_a:
-        print("⚠  Second-cycle edit differs from first — suggests drift. "
-              f"first='{edited_a[:60]}…'  vs  second='{edited_c[:60]}…'")
+        print(
+            "⚠  Second-cycle edit differs from first — suggests drift. "
+            f"first='{edited_a[:60]}…'  vs  second='{edited_c[:60]}…'"
+        )
         # This is not a hard failure; drift of <1 token under BF16 is expected.
     else:
         print("      ✓ Second-cycle edited output matches first cycle.")

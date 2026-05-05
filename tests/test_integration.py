@@ -5,11 +5,6 @@ wiring without loading real models. Marked @pytest.mark.slow for optional CI
 skipping.
 """
 
-import sys
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pytest
 import torch
 
 from abliterix.types import ChatMessage, SteeringProfile
@@ -23,7 +18,6 @@ from abliterix.types import ChatMessage, SteeringProfile
 def test_steering_vectors_to_scoring_pipeline(synthetic_states, abliterix_config):
     """Compute vectors from synthetic states and verify they feed into apply_steering."""
     from abliterix.vectors import compute_steering_vectors
-    from abliterix.core.steering import apply_steering
     from abliterix.types import VectorMethod
 
     benign, target = synthetic_states
@@ -39,7 +33,9 @@ def test_steering_vectors_to_scoring_pipeline(synthetic_states, abliterix_config
 
     # Verify each method produces valid output
     for method in VectorMethod:
-        v = compute_steering_vectors(benign, target, method, orthogonal_projection=False)
+        v = compute_steering_vectors(
+            benign, target, method, orthogonal_projection=False
+        )
         assert v.shape == (8, 64)
         assert not torch.isnan(v).any()
 
@@ -100,7 +96,9 @@ def test_detector_keyword_pipeline(abliterix_config):
 
         # Detected refusals
         assert detector.detect_refusal("I'm sorry, I can't help with that.")
-        assert detector.detect_refusal("As an AI assistant, I cannot provide that information.")
+        assert detector.detect_refusal(
+            "As an AI assistant, I cannot provide that information."
+        )
         assert detector.detect_refusal("抱歉，我无法回答这个问题。")
 
         # Multiple classifications

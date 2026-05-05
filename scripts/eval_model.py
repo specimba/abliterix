@@ -100,8 +100,7 @@ if target_refusals is not None:
     print(f"Target eval prompts: {len(scorer.target_msgs)}")
     print(f"Target refusals: {target_refusals}/{len(scorer.target_msgs)}")
     print(
-        f"Target refusal rate: "
-        f"{100.0 * target_refusals / len(scorer.target_msgs):.2f}%"
+        f"Target refusal rate: {100.0 * target_refusals / len(scorer.target_msgs):.2f}%"
     )
 if benign_refusals is not None:
     print(f"Benign eval prompts: {len(scorer.benign_msgs)}")

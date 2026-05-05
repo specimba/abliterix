@@ -18,6 +18,7 @@ Output: prints all N eval prompts with (refusal|compliant) verdict + truncated
 response. Ends with summary + list of only the "refused" indices for quick
 false-positive review.
 """
+
 import argparse
 import os
 import sys
@@ -144,7 +145,7 @@ def main():
         tag = "REFUSED " if is_ref else "compliant"
         print(f"\n[{i:3d}] {tag}  |  {msg.user[:200]}")
         printed = resp if resp.strip() else "[empty]"
-        print(f"      A: {printed[:args.max_response_print]}")
+        print(f"      A: {printed[: args.max_response_print]}")
         if is_ref:
             refused_idx.append(i)
 

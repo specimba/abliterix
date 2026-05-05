@@ -11,6 +11,7 @@ Usage:
         --upstream Qwen/Qwen3.6-35B-A3B \
         --downstream wangzhang/Qwen3.6-35B-A3B-abliterated
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,10 +39,21 @@ DEFAULT_FILES = ["tokenizer_config.json"]
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--upstream", required=True, help="Source model repo (e.g. google/gemma-4-31B-it)")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--upstream",
+        required=True,
+        help="Source model repo (e.g. google/gemma-4-31B-it)",
+    )
     parser.add_argument("--downstream", required=True, help="Target abliterated repo")
-    parser.add_argument("--files", nargs="+", default=DEFAULT_FILES, help="Files to sync (default: tokenizer_config.json)")
+    parser.add_argument(
+        "--files",
+        nargs="+",
+        default=DEFAULT_FILES,
+        help="Files to sync (default: tokenizer_config.json)",
+    )
     args = parser.parse_args()
 
     api = HfApi(token=TOKEN)

@@ -58,8 +58,7 @@ def parse_args() -> argparse.Namespace:
         choices=["transformers", "openai"],
         default="transformers",
         help=(
-            "Generation backend. Use openai for llama.cpp/MLX/LM Studio/Ollama "
-            "servers."
+            "Generation backend. Use openai for llama.cpp/MLX/LM Studio/Ollama servers."
         ),
     )
     parser.add_argument(
@@ -189,8 +188,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         default=None,
         help=(
-            "Output JSON path. Defaults to "
-            "artifacts/<model>_<split>_refusal_eval.json."
+            "Output JSON path. Defaults to artifacts/<model>_<split>_refusal_eval.json."
         ),
     )
     parser.add_argument(
@@ -406,7 +404,7 @@ def post_chat_completion(
         ) as exc:
             last_exc = exc
             if attempt < 2:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
     raise RuntimeError(f"Generation request failed after 3 attempts: {last_exc}")
 
 

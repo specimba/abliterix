@@ -49,7 +49,9 @@ def _make_mock_engine() -> SteeringEngine:
     engine.model = model  # ty:ignore[invalid-assignment]
     engine.response_prefix = ""
     engine.config = SimpleNamespace(
-        inference=SimpleNamespace(max_gen_tokens=999, min_gen_tokens=None, batch_size=2),
+        inference=SimpleNamespace(
+            max_gen_tokens=999, min_gen_tokens=None, batch_size=2
+        ),
     )
     # _reset_position_cache is called from _generate; stub it out.
     engine._reset_position_cache = lambda: None  # type: ignore[method-assign]
@@ -130,7 +132,9 @@ class _TokenizerThatDropsTemplate:
     chat_template = "{{ messages }}"
 
     def apply_chat_template(self, *_args, **_kwargs):
-        raise ValueError("Cannot use chat template functions because tokenizer.chat_template is not set")
+        raise ValueError(
+            "Cannot use chat template functions because tokenizer.chat_template is not set"
+        )
 
 
 class _TokenizerWithoutEnableThinking:

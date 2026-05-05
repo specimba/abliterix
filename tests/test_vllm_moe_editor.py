@@ -167,9 +167,7 @@ def test_router_paths_covers_known_architectures():
 
 
 def _build_worker_with_routers(num_layers: int, num_experts: int, hidden: int = 32):
-    decoder = _DecoderLike(
-        [_MoeLayer(hidden, num_experts) for _ in range(num_layers)]
-    )
+    decoder = _DecoderLike([_MoeLayer(hidden, num_experts) for _ in range(num_layers)])
     top = _TopLikeTwoLevel(decoder)
     return _make_worker(top), decoder
 
@@ -185,9 +183,7 @@ def test_install_persistent_suppression_is_idempotent():
 def test_install_then_set_plan_affects_forward():
     """After installing the persistent hook and setting a plan, a forward
     through the router subtracts the penalty from the designated expert."""
-    worker, decoder = _build_worker_with_routers(
-        num_layers=2, num_experts=8, hidden=16
-    )
+    worker, decoder = _build_worker_with_routers(num_layers=2, num_experts=8, hidden=16)
     n = _worker_install_persistent_suppression(worker)
     assert n == 2
 
@@ -215,9 +211,7 @@ def test_install_then_set_plan_affects_forward():
 
 def test_clear_plan_restores_baseline():
     """After clear, no penalty is applied — logits match an un-hooked forward."""
-    worker, decoder = _build_worker_with_routers(
-        num_layers=1, num_experts=6, hidden=16
-    )
+    worker, decoder = _build_worker_with_routers(num_layers=1, num_experts=6, hidden=16)
     _worker_install_persistent_suppression(worker)
 
     layer = decoder.layers[0]
@@ -252,9 +246,7 @@ def test_plan_mutation_does_not_reinstall_hook():
 
 def test_plan_survives_dtype_cast():
     """Router logits may be bf16 on GPU — hook must cast penalties to match."""
-    worker, decoder = _build_worker_with_routers(
-        num_layers=1, num_experts=4, hidden=8
-    )
+    worker, decoder = _build_worker_with_routers(num_layers=1, num_experts=4, hidden=8)
     _worker_install_persistent_suppression(worker)
     _worker_set_suppression_plan(worker, {0: ([2], [42.0])})
 
@@ -327,8 +319,11 @@ class _MoeLayerWithExperts(nn.Module):
         self.mlp = nn.Module()
         self.mlp.gate = _RouterLike(hidden, num_experts)
         self.mlp.experts = _FusedMoELike(
-            num_experts, hidden, intermediate,
-            transposed=transposed, dtype=dtype,
+            num_experts,
+            hidden,
+            intermediate,
+            transposed=transposed,
+            dtype=dtype,
         )
 
 
@@ -384,7 +379,9 @@ def test_probe_experts_reports_shapes():
 
 
 def test_backup_and_restore_round_trip():
-    worker, decoder = _build_worker_with_experts(num_layers=2, hidden=8, intermediate=16)
+    worker, decoder = _build_worker_with_experts(
+        num_layers=2, hidden=8, intermediate=16
+    )
     # Snapshot reference values before any edit.
     ref_l0 = decoder.layers[0].mlp.experts.w2_weight.data.clone()
     ref_l1 = decoder.layers[1].mlp.experts.w2_weight.data.clone()
@@ -412,11 +409,13 @@ def _reference_projection_standard(
     """
     W32 = W.to(torch.float32)
     vf = v.to(torch.float32)
-    proj = torch.einsum("o,eoi->ei", vf, W32)                # (E, intermediate)
+    proj = torch.einsum("o,eoi->ei", vf, W32)  # (E, intermediate)
     W_new = W32 - strength * (vf.view(1, -1, 1) * proj.unsqueeze(1))
     if norm_preserve:
         orig_norms = torch.linalg.vector_norm(W32, dim=-1, keepdim=True)
-        new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(min=1e-8)
+        new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(
+            min=1e-8
+        )
         W_new = W_new * (orig_norms / new_norms)
     return W_new.to(W.dtype)
 
@@ -430,11 +429,13 @@ def _reference_projection_transposed(
     """
     W32 = W.to(torch.float32)
     vf = v.to(torch.float32)
-    proj = torch.matmul(W32, vf)                             # (E, intermediate)
+    proj = torch.matmul(W32, vf)  # (E, intermediate)
     W_new = W32 - strength * (proj.unsqueeze(-1) * vf.view(1, 1, -1))
     if norm_preserve:
         orig_norms = torch.linalg.vector_norm(W32, dim=-1, keepdim=True)
-        new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(min=1e-8)
+        new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(
+            min=1e-8
+        )
         W_new = W_new * (orig_norms / new_norms)
     return W_new.to(W.dtype)
 
@@ -447,7 +448,9 @@ def test_apply_ega_batch_standard_layout_matches_reference():
     )
     v = torch.randn(4)  # hidden dim
     W_ref_in = decoder.layers[0].mlp.experts.w2_weight.data.clone()
-    expected = _reference_projection_standard(W_ref_in, v, strength=1.7, norm_preserve=True)
+    expected = _reference_projection_standard(
+        W_ref_in, v, strength=1.7, norm_preserve=True
+    )
 
     plan = [{"layer_idx": 0, "v": _save_vec(v), "strength": 1.7, "hidden_dim": 4}]
     result = _worker_apply_ega_batch(worker, plan, norm_preserve=True)
@@ -469,12 +472,19 @@ def test_apply_ega_batch_transposed_layout_matches_reference():
     )
     v = torch.randn(4)  # hidden dim
     W_ref_in = decoder.layers[0].mlp.experts.w2_weight.data.clone()
-    expected = _reference_projection_transposed(W_ref_in, v, strength=2.3, norm_preserve=True)
+    expected = _reference_projection_transposed(
+        W_ref_in, v, strength=2.3, norm_preserve=True
+    )
 
-    plan = [{
-        "layer_idx": 0, "v": _save_vec(v), "strength": 2.3,
-        "hidden_dim": 4, "transposed": True,
-    }]
+    plan = [
+        {
+            "layer_idx": 0,
+            "v": _save_vec(v),
+            "strength": 2.3,
+            "hidden_dim": 4,
+            "transposed": True,
+        }
+    ]
     result = _worker_apply_ega_batch(worker, plan, norm_preserve=True)
 
     assert result["applied"] == 1
@@ -495,12 +505,19 @@ def test_apply_ega_batch_ambiguous_square_resolves_via_flag():
     )
     v = torch.randn(4)
     W_ref = decoder.layers[0].mlp.experts.w2_weight.data.clone()
-    expected = _reference_projection_transposed(W_ref, v, strength=1.0, norm_preserve=False)
+    expected = _reference_projection_transposed(
+        W_ref, v, strength=1.0, norm_preserve=False
+    )
 
-    plan = [{
-        "layer_idx": 0, "v": _save_vec(v), "strength": 1.0,
-        "hidden_dim": 4, "transposed": True,
-    }]
+    plan = [
+        {
+            "layer_idx": 0,
+            "v": _save_vec(v),
+            "strength": 1.0,
+            "hidden_dim": 4,
+            "transposed": True,
+        }
+    ]
     result = _worker_apply_ega_batch(worker, plan, norm_preserve=False)
 
     assert result["applied"] == 1
@@ -517,8 +534,8 @@ def test_apply_ega_batch_dimension_mismatch_records_error():
     )
     W_before_l0 = decoder.layers[0].mlp.experts.w2_weight.data.clone()
 
-    bad_v = torch.randn(99)      # wrong dim
-    good_v = torch.randn(4)      # correct hidden dim
+    bad_v = torch.randn(99)  # wrong dim
+    good_v = torch.randn(4)  # correct hidden dim
 
     plan = [
         {"layer_idx": 0, "v": _save_vec(bad_v), "strength": 1.0, "hidden_dim": 4},
@@ -578,7 +595,9 @@ from abliterix.core.vllm_moe_editor import (  # noqa: E402
 class _QKVParallelLike(nn.Module):
     def __init__(self, q_size: int, kv_size: int, hidden: int, dtype=torch.float32):
         super().__init__()
-        self.weight = nn.Parameter(torch.randn(q_size + 2 * kv_size, hidden, dtype=dtype))
+        self.weight = nn.Parameter(
+            torch.randn(q_size + 2 * kv_size, hidden, dtype=dtype)
+        )
 
 
 class _RowParallelLike(nn.Module):
@@ -639,8 +658,11 @@ def _build_worker_with_attn(
 ) -> tuple[types.SimpleNamespace, _DecoderLike]:
     layers = [
         _AttnMoeLayer(
-            hidden=hidden, q_heads=q_heads, kv_heads=kv_heads,
-            head_dim=head_dim, dtype=dtype,
+            hidden=hidden,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            head_dim=head_dim,
+            dtype=dtype,
         )
         for _ in range(num_layers)
     ]
@@ -656,8 +678,8 @@ def test_locate_attention_finds_qkv_and_o():
     assert attn is not None
     assert path == "self_attn"
     assert hasattr(attn, "qkv_proj") and hasattr(attn, "o_proj")
-    assert attn.q_size == 16   # 4 heads × 4 head_dim
-    assert attn.kv_size == 8   # 2 heads × 4 head_dim
+    assert attn.q_size == 16  # 4 heads × 4 head_dim
+    assert attn.kv_size == 8  # 2 heads × 4 head_dim
 
 
 def test_probe_attention_reports_shapes_and_sizes():
@@ -699,10 +721,14 @@ def test_apply_attn_q_proj_slice_matches_reference():
     v = torch.randn(8)  # hidden
     expected = _reference_attn_projection(q_ref_in, v, strength=1.3, norm_preserve=True)
 
-    plan = [{
-        "layer_idx": 0, "component": "q_proj",
-        "v": _save_vec(v), "strength": 1.3,
-    }]
+    plan = [
+        {
+            "layer_idx": 0,
+            "component": "q_proj",
+            "v": _save_vec(v),
+            "strength": 1.3,
+        }
+    ]
     result = _worker_apply_attn_batch(worker, plan, norm_preserve=True)
 
     assert result["applied"] == 1 and result["errors"] == []
@@ -720,8 +746,7 @@ def test_apply_attn_k_proj_only_touches_k_slice():
     before_v = attn.qkv_proj.weight.data[attn.q_size + attn.kv_size :].clone()
 
     v = torch.randn(8)
-    plan = [{"layer_idx": 0, "component": "k_proj",
-             "v": _save_vec(v), "strength": 2.0}]
+    plan = [{"layer_idx": 0, "component": "k_proj", "v": _save_vec(v), "strength": 2.0}]
     result = _worker_apply_attn_batch(worker, plan, norm_preserve=True)
     assert result["applied"] == 1
 
@@ -740,8 +765,7 @@ def test_apply_attn_o_proj_projects_on_output_axis():
     v = torch.randn(8)  # hidden — matches out dim of o_proj
     expected = _reference_attn_projection(o_ref, v, strength=1.7, norm_preserve=True)
 
-    plan = [{"layer_idx": 0, "component": "o_proj",
-             "v": _save_vec(v), "strength": 1.7}]
+    plan = [{"layer_idx": 0, "component": "o_proj", "v": _save_vec(v), "strength": 1.7}]
     result = _worker_apply_attn_batch(worker, plan, norm_preserve=True)
     assert result["applied"] == 1 and result["errors"] == []
     assert torch.allclose(attn.o_proj.weight.data, expected, atol=1e-5)
@@ -750,8 +774,7 @@ def test_apply_attn_o_proj_projects_on_output_axis():
 def test_apply_attn_unknown_component_records_error():
     worker, _ = _build_worker_with_attn(num_layers=1)
     v = torch.randn(8)
-    plan = [{"layer_idx": 0, "component": "x_proj",
-             "v": _save_vec(v), "strength": 1.0}]
+    plan = [{"layer_idx": 0, "component": "x_proj", "v": _save_vec(v), "strength": 1.0}]
     result = _worker_apply_attn_batch(worker, plan, norm_preserve=False)
     assert result["applied"] == 0
     assert len(result["errors"]) == 1

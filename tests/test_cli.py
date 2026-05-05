@@ -65,12 +65,12 @@ def test_custom_toml_config():
     old_argv = sys.argv
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-        f.write('[model]\n')
+        f.write("[model]\n")
         f.write('quant_method = "bnb_4bit"\n')
-        f.write('[optimization]\n')
-        f.write('num_trials = 42\n')
-        f.write('[kl]\n')
-        f.write('scale = 2.5\n')
+        f.write("[optimization]\n")
+        f.write("num_trials = 42\n")
+        f.write("[kl]\n")
+        f.write("scale = 2.5\n")
         toml_path = f.name
 
     try:
@@ -104,8 +104,8 @@ def test_cli_overrides_toml():
     old_argv = sys.argv
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-        f.write('[optimization]\n')
-        f.write('num_trials = 100\n')
+        f.write("[optimization]\n")
+        f.write("num_trials = 100\n")
         toml_path = f.name
 
     try:

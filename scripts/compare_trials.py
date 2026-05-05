@@ -31,7 +31,5 @@ for label, ckpt, idx in [
         )
     moe = t.user_attrs.get("moe_parameters", {})
     if moe:
-        print(
-            f"  moe: n_sup={moe['n_suppress']} bias={moe['router_bias']:.2f}"
-        )
+        print(f"  moe: n_sup={moe['n_suppress']} bias={moe['router_bias']:.2f}")
     print()

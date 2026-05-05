@@ -194,7 +194,7 @@ def build_card(m: dict) -> ModelCard:
             f'tokenizer = AutoTokenizer.from_pretrained("{m["repo_id"]}")\n\n'
             'messages = [{"role": "user", "content": "Your question here"}]\n'
             "text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)\n"
-            "inputs = tokenizer(text, return_tensors=\"pt\").to(model.device)\n"
+            'inputs = tokenizer(text, return_tensors="pt").to(model.device)\n'
             "outputs = model.generate(**inputs, max_new_tokens=512)\n"
             "print(tokenizer.decode(outputs[0], skip_special_tokens=True))\n"
             "```"
@@ -279,9 +279,9 @@ def main():
     for m in MODELS:
         card = build_card(m)
         if args.dry_run:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"  {m['repo_id']}")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             print(card)
             print()
         else:

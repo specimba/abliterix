@@ -89,9 +89,9 @@ def main() -> int:
         return 1
     out_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"[1/4] Importing HF + forcing Mxfp4Config(dequantize=True)…")
+    print("[1/4] Importing HF + forcing Mxfp4Config(dequantize=True)…")
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     try:
         from transformers import Mxfp4Config
@@ -176,9 +176,8 @@ def main() -> int:
         # Try HF cache first.
         try:
             from huggingface_hub import hf_hub_download
-            src = hf_hub_download(
-                repo_id=args.model, filename=name, repo_type="model"
-            )
+
+            src = hf_hub_download(repo_id=args.model, filename=name, repo_type="model")
         except Exception:
             pass
         if src and Path(src).exists() and not (out_path / name).exists():
@@ -192,7 +191,7 @@ def main() -> int:
     )
     print()
     print("Next step:")
-    print(f"  Edit your config's [model] model_id to \"{out_path}\"")
+    print(f'  Edit your config\'s [model] model_id to "{out_path}"')
     print("  or pass --model-id via CLI override.")
     return 0
 

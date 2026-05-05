@@ -32,8 +32,8 @@ for comp, p in params.items():
     print(f"  max_weight_position = {p['max_weight_position']:.3f}")
     print(f"  min_weight = {p['min_weight']:.3f}")
     print(f"  min_weight_distance = {p['min_weight_distance']:.3f}")
-    min_frac = p['min_weight'] / max(p['max_weight'], 0.01)
-    print(f"  -> min_frac = {min_frac*100:.1f}%")
+    min_frac = p["min_weight"] / max(p["max_weight"], 0.01)
+    print(f"  -> min_frac = {min_frac * 100:.1f}%")
     print()
 moe = t.user_attrs.get("moe_parameters", {})
 if moe:
@@ -41,5 +41,5 @@ if moe:
     print(f"  n_suppress = {moe['n_suppress']}")
     print(f"  router_bias = {moe['router_bias']:.3f}")
     print(f"  expert_ablation_weight = {moe.get('expert_ablation_weight', 0):.3f}")
-    scale = max(0.0, 1.0 + moe['router_bias'] / 10.0)
+    scale = max(0.0, 1.0 + moe["router_bias"] / 10.0)
     print(f"  -> suppression scale = {scale:.3f}")

@@ -5,6 +5,7 @@ Usage:
     python scripts/quick_test_hf.py --model wangzhang/Qwen3.6-35B-A3B-abliterated
     python scripts/quick_test_hf.py --model /workspace/export_dir --max-tokens 300
 """
+
 import argparse
 
 import torch
@@ -30,9 +31,13 @@ DEFAULT_PROMPTS = [
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--model", required=True, help="HF model ID or local path")
-    parser.add_argument("--max-tokens", type=int, default=200, help="Max new tokens (default: 200)")
+    parser.add_argument(
+        "--max-tokens", type=int, default=200, help="Max new tokens (default: 200)"
+    )
     parser.add_argument("--cache-dir", default=None, help="HF cache directory")
     args = parser.parse_args()
 
@@ -42,7 +47,8 @@ def main():
         kwargs["cache_dir"] = args.cache_dir
     model = AutoModelForCausalLM.from_pretrained(args.model, **kwargs)
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model, cache_dir=args.cache_dir if args.cache_dir else None,
+        args.model,
+        cache_dir=args.cache_dir if args.cache_dir else None,
     )
     print("Model loaded.\n")
 
@@ -52,13 +58,19 @@ def main():
         template_kwargs = {"tokenize": False, "add_generation_prompt": True}
         # Disable thinking for models that support it (e.g. Qwen3)
         try:
-            text = tokenizer.apply_chat_template(messages, enable_thinking=False, **template_kwargs)
+            text = tokenizer.apply_chat_template(
+                messages, enable_thinking=False, **template_kwargs
+            )
         except TypeError:
             text = tokenizer.apply_chat_template(messages, **template_kwargs)
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=args.max_tokens, do_sample=False)
-        resp = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            out = model.generate(
+                **inputs, max_new_tokens=args.max_tokens, do_sample=False
+            )
+        resp = tokenizer.decode(
+            out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
+        )
         print(f"[{i}/{total}] Q: {p}")
         print(f"A: {resp[:400]}")
         print("---")

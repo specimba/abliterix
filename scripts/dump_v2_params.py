@@ -25,11 +25,13 @@ for idx in [49, 45, 88, 74, 43, 60]:
     for comp, p in params.items():
         print(
             f"  {comp}: max={p['max_weight']:.2f}  pos={p['max_weight_position']:.1f}  "
-            f"min={p['min_weight']:.2f} ({p['min_weight']/max(p['max_weight'],0.01)*100:.0f}%)  "
+            f"min={p['min_weight']:.2f} ({p['min_weight'] / max(p['max_weight'], 0.01) * 100:.0f}%)  "
             f"dist={p['min_weight_distance']:.1f}"
         )
     moe = t.user_attrs.get("moe_parameters", {})
     if moe:
-        print(f"  moe: n_sup={moe['n_suppress']}  bias={moe['router_bias']:.2f}  "
-              f"abl_w={moe.get('expert_ablation_weight', 0):.2f}")
+        print(
+            f"  moe: n_sup={moe['n_suppress']}  bias={moe['router_bias']:.2f}  "
+            f"abl_w={moe.get('expert_ablation_weight', 0):.2f}"
+        )
     print()

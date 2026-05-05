@@ -233,8 +233,7 @@ def _bucket_rates(
         key = e.get(field, "unknown")
         counts.setdefault(key, []).append(int(bool(lab)))
     return {
-        k: round(sum(v) / len(v), 6) if v else 0.0
-        for k, v in sorted(counts.items())
+        k: round(sum(v) / len(v), 6) if v else 0.0 for k, v in sorted(counts.items())
     }
 
 
@@ -407,10 +406,7 @@ def main() -> int:  # noqa: PLR0915 — top-level orchestration is intentionally
     # 6. Judge harmful (refusal) and benign (over-refusal).
     print("[bench] judging harmful responses (refusal)...")
     refusal_labels = _judge_responses(detector, harmful_prompts, target_resp_harmful)
-    print(
-        f"[bench] refusal_rate_total = "
-        f"{sum(refusal_labels)}/{len(refusal_labels)}"
-    )
+    print(f"[bench] refusal_rate_total = {sum(refusal_labels)}/{len(refusal_labels)}")
 
     print("[bench] judging benign responses (over-refusal)...")
     over_refusal_labels = _judge_responses(detector, benign_prompts, target_resp_benign)
@@ -428,41 +424,62 @@ def main() -> int:  # noqa: PLR0915 — top-level orchestration is intentionally
         "model": args.model,
         "base_model": args.base_model,
         "tier": args.tier,
-
         "refusal_rate_total": _overall_rate(refusal_labels),
         "refusal_rate_en": _overall_rate(
-            [lab for e, lab in zip(harmful_entries, refusal_labels) if e.get("language") == "en"]
+            [
+                lab
+                for e, lab in zip(harmful_entries, refusal_labels)
+                if e.get("language") == "en"
+            ]
         ),
         "refusal_rate_zh": _overall_rate(
-            [lab for e, lab in zip(harmful_entries, refusal_labels) if e.get("language") == "zh"]
+            [
+                lab
+                for e, lab in zip(harmful_entries, refusal_labels)
+                if e.get("language") == "zh"
+            ]
         ),
         "refusal_rate_mixed": _overall_rate(
-            [lab for e, lab in zip(harmful_entries, refusal_labels) if e.get("language") == "mixed"]
+            [
+                lab
+                for e, lab in zip(harmful_entries, refusal_labels)
+                if e.get("language") == "mixed"
+            ]
         ),
-        "refusal_rate_by_category": _bucket_rates(harmful_entries, refusal_labels, "category"),
-
+        "refusal_rate_by_category": _bucket_rates(
+            harmful_entries, refusal_labels, "category"
+        ),
         "over_refusal_rate_total": _overall_rate(over_refusal_labels),
         "over_refusal_rate_en": _overall_rate(
-            [lab for e, lab in zip(benign_entries, over_refusal_labels) if e.get("language") == "en"]
+            [
+                lab
+                for e, lab in zip(benign_entries, over_refusal_labels)
+                if e.get("language") == "en"
+            ]
         ),
         "over_refusal_rate_zh": _overall_rate(
-            [lab for e, lab in zip(benign_entries, over_refusal_labels) if e.get("language") == "zh"]
+            [
+                lab
+                for e, lab in zip(benign_entries, over_refusal_labels)
+                if e.get("language") == "zh"
+            ]
         ),
         "over_refusal_rate_mixed": _overall_rate(
-            [lab for e, lab in zip(benign_entries, over_refusal_labels) if e.get("language") == "mixed"]
+            [
+                lab
+                for e, lab in zip(benign_entries, over_refusal_labels)
+                if e.get("language") == "mixed"
+            ]
         ),
         "over_refusal_rate_by_category": _bucket_rates(
             benign_entries, over_refusal_labels, "category"
         ),
-
         "kl_vs_base": round(kl_vs_base, 6),
         "degenerate_rate": round(degenerate_rate, 6),
         "mean_response_length": round(mean_len, 3),
         "length_z_score": round(length_z, 3),
-
         "n_harmful": len(harmful_entries),
         "n_benign": len(benign_entries),
-
         "judge_model": SPEC_JUDGE_MODEL,
         "judge_cache_sha256": judge_cache_sha,
         "dataset_sha256_harmful": harmful_sha,
@@ -470,7 +487,6 @@ def main() -> int:  # noqa: PLR0915 — top-level orchestration is intentionally
         "commit": _git_commit(),
         "gpu": _gpu_name(),
         "runtime_seconds": round(time.time() - t0, 1),
-
         "min_new_tokens": SPEC_MIN_NEW_TOKENS,
         "max_new_tokens": SPEC_MAX_NEW_TOKENS,
         "dry_run": bool(args.dry_run),
@@ -483,7 +499,9 @@ def main() -> int:  # noqa: PLR0915 — top-level orchestration is intentionally
     else:
         slug = args.model.replace("/", "__")
         out_path = RESULTS_DIR / f"{slug}.json"
-    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_path.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     print(f"\n[bench] wrote {out_path}")
 
     raw_path = out_path.with_suffix(".outputs.jsonl")
@@ -504,7 +522,9 @@ def main() -> int:  # noqa: PLR0915 — top-level orchestration is intentionally
                 )
                 + "\n"
             )
-        for e, resp, lab in zip(benign_entries, target_resp_benign, over_refusal_labels):
+        for e, resp, lab in zip(
+            benign_entries, target_resp_benign, over_refusal_labels
+        ):
             f.write(
                 json.dumps(
                     {
