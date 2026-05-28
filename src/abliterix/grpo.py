@@ -285,7 +285,12 @@ def ppo_clip_loss(
     adv = advantages.unsqueeze(-1)  # (B, 1)
     surr_1 = ratio * adv
     surr_2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv
-    per_token_policy = -torch.min(surr_1, surr_2)
+    # torch.minimum (explicit elementwise) instead of torch.min — on
+    # torch ≤ 2.11 the two-tensor overload of torch.min sometimes returns
+    # a non-grad-tracking tensor when surr_1 == surr_2 bit-identically
+    # (which happens whenever ratio sits strictly inside the clip window,
+    # since clamp is a no-op there). torch.minimum has consistent autograd.
+    per_token_policy = -torch.minimum(surr_1, surr_2)
 
     per_token_kl = log_probs_new - log_probs_ref  # token-level KL in [-inf, inf]
 
