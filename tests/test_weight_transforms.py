@@ -166,7 +166,7 @@ def test_orba_zero_strength_with_norm_preserve_is_identity():
 
 def test_orba_input_dim_mismatch_raises():
     W = _rand_W(out_f=4, in_f=8)
-    with pytest.raises(ValueError, match="input-side"):
+    with pytest.raises(ValueError, match="does not match either axis"):
         apply_orba_transform(W, torch.randn(10), torch.randn(10))
 
 
@@ -205,7 +205,7 @@ def test_biprojected_zero_strength_with_renorm_returns_input():
 
 def test_biprojected_input_dim_mismatch_raises():
     W = _rand_W(out_f=4, in_f=8)
-    with pytest.raises(ValueError, match="input-side"):
+    with pytest.raises(ValueError, match="does not match either axis"):
         apply_biprojected_transform(W, torch.randn(7))
 
 
@@ -227,7 +227,7 @@ def test_householder_is_isometry_at_full_strength():
 
 def test_householder_input_dim_mismatch_raises():
     W = _rand_W(out_f=4, in_f=8)
-    with pytest.raises(ValueError, match="input-side"):
+    with pytest.raises(ValueError, match="does not match either axis"):
         apply_householder_transform(W, torch.randn(10), torch.randn(10))
 
 

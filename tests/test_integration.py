@@ -31,12 +31,18 @@ def test_steering_vectors_to_scoring_pipeline(synthetic_states, abliterix_config
     # Verify vectors are non-trivial (not all zeros)
     assert vectors.norm() > 0
 
-    # Verify each method produces valid output
+    # Verify each method produces valid output. SOM is inherently multi-
+    # direction (returns shape (n_dirs, n_layers, hidden_dim)) while single-
+    # direction methods return (n_layers, hidden_dim); both should agree on
+    # the trailing two axes. SAE requires a separate sae_path config (external
+    # autoencoder artifact) and is excluded from this generic sweep.
     for method in VectorMethod:
+        if method == VectorMethod.SAE:
+            continue
         v = compute_steering_vectors(
             benign, target, method, orthogonal_projection=False
         )
-        assert v.shape == (8, 64)
+        assert v.shape[-2:] == (8, 64)
         assert not torch.isnan(v).any()
 
 
