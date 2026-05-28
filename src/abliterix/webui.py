@@ -198,6 +198,16 @@ def _run_optimisation(
             sra_base_method=config.steering.sra_base_method,
             sra_n_atoms=config.steering.sra_n_atoms,
             sra_ridge_alpha=config.steering.sra_ridge_alpha,
+            ablate_harmfulness_direction=config.steering.ablate_harmfulness_direction,
+            harmfulness_layer_band=tuple(config.steering.harmfulness_layer_band),
+            som_grid_h=config.steering.som_grid_h,
+            som_grid_w=config.steering.som_grid_w,
+            som_n_iters=config.steering.som_n_iters,
+            som_initial_lr=config.steering.som_initial_lr,
+            som_seed=config.steering.som_seed,
+            sae_path=config.steering.sae_path,
+            sae_layer=config.steering.sae_layer,
+            sae_top_k=config.steering.sae_top_k,
         )
         _session.steering_vectors = vectors
 

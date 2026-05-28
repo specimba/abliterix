@@ -164,6 +164,16 @@ def compute_steering_vectors(
     sra_base_method: VectorMethod | None = None,
     sra_n_atoms: int = 8,
     sra_ridge_alpha: float = 0.01,
+    ablate_harmfulness_direction: bool = False,
+    harmfulness_layer_band: tuple[float, float] = (0.3, 0.7),
+    som_grid_h: int = 3,
+    som_grid_w: int = 3,
+    som_n_iters: int = 500,
+    som_initial_lr: float = 0.5,
+    som_seed: int = 0,
+    sae_path: str | None = None,
+    sae_layer: int = 0,
+    sae_top_k: int = 8,
 ) -> Tensor:
     """Derive per-layer steering vectors from benign and target residuals.
 
@@ -195,13 +205,39 @@ def compute_steering_vectors(
         multi-direction mode, returning shape ``(n_dirs, layers+1, dim)``).
     token_position_split : bool
         Reserved for future harmfulness/refusal token-position separation.
+    ablate_harmfulness_direction : bool
+        If True, decompose the steering signal into a refusal direction
+        (standard mean-diff) and a harmfulness direction (Zhao et al. 2025,
+        arXiv:2507.11878) orthogonal to it, returning the stacked pair with
+        shape ``(2, layers+1, hidden_dim)``.  Incompatible with
+        ``n_directions > 1`` and with SRA/COSMIC/OT (which build their own
+        bases) — validated at config load.
+    harmfulness_layer_band : tuple[float, float]
+        Fractional layer range ``(lo, hi)`` where the harmfulness direction
+        is strongest.  Defaults to ``(0.3, 0.7)``.
 
     Returns
     -------
     Tensor
         Unit-normalised steering vectors.  Shape ``(layers+1, hidden_dim)``
-        when ``n_directions == 1``, otherwise ``(n_dirs, layers+1, dim)``.
+        when ``n_directions == 1`` and no harmfulness flag, otherwise
+        ``(n_dirs, layers+1, dim)``.
     """
+
+    # --- Joint harmfulness + refusal direction (Zhao et al. 2025) ---
+    # Routed before multi-direction because it reuses the same stacked
+    # output layout (n_dirs=2) but with a semantic decomposition that does
+    # not collapse to SVD top-k.
+    if ablate_harmfulness_direction:
+        from .harmfulness import extract_harm_refusal_pair
+
+        return extract_harm_refusal_pair(
+            benign_states,
+            target_states,
+            layer_band=tuple(harmfulness_layer_band),  # type: ignore[arg-type]
+            orthogonal_projection=orthogonal_projection,
+            projected_abliteration=projected_abliteration,
+        )
 
     # --- Multi-direction mode ---
     if n_directions > 1:
@@ -247,6 +283,41 @@ def compute_steering_vectors(
             vectors = vectors - proj.unsqueeze(1) * benign_dir
             vectors = F.normalize(vectors, p=2, dim=1)
         return vectors
+
+    if method == VectorMethod.SAE:
+        if sae_path is None:
+            raise ValueError(
+                "vector_method='sae' requires sae_path to be set "
+                "(SteeringConfig.sae_path)."
+            )
+        from .sae import compute_sae_steering_directions, load_sae
+
+        sae = load_sae(sae_path, hidden_dim=target_states.shape[-1])
+        directions, _scores = compute_sae_steering_directions(
+            sae,
+            benign_states,
+            target_states,
+            sae_layer=sae_layer,
+            top_k=sae_top_k,
+            orthogonal_projection=orthogonal_projection,
+            projected_abliteration=projected_abliteration,
+        )
+        return directions
+
+    if method == VectorMethod.SOM:
+        from .som import compute_som_directions
+
+        return compute_som_directions(
+            benign_states,
+            target_states,
+            grid_h=som_grid_h,
+            grid_w=som_grid_w,
+            n_iters=som_n_iters,
+            initial_lr=som_initial_lr,
+            seed=som_seed,
+            orthogonal_projection=orthogonal_projection,
+            projected_abliteration=projected_abliteration,
+        )
 
     if method == VectorMethod.SRA:
         from .sra import compute_sra_vectors

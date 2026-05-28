@@ -41,6 +41,7 @@ from .core.vllm_compilation_config import CompileMode  # noqa: E402
 
 from .types import (  # noqa: E402
     DecayKernel,
+    DirectTransform,
     PromptSource,
     QuantMode,
     SteeringMode,
@@ -552,6 +553,37 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    ablate_harmfulness_direction: bool = Field(
+        default=False,
+        description=(
+            "Extract and ablate the harmfulness direction in addition to the "
+            "refusal direction (Zhao et al. 2025, arXiv:2507.11878).  "
+            "The standard mean-diff vector conflates 'do I refuse' with "
+            "'is this harmful'; this flag extracts the second signal "
+            "separately (PCA-1 of centred target states, dominant in mid "
+            "layers) and orthogonalises it against the refusal direction so "
+            "both are ablated jointly.  Reduces hedging behaviour on "
+            "abliterated models that comply but still flag the request "
+            "as harmful.  Implemented via the existing multi-direction "
+            "infrastructure — incompatible with ``n_directions > 1`` and "
+            "with ``vector_method`` set to ``sra``, ``cosmic``, or "
+            "``optimal_transport`` (those paths build their own bases)."
+        ),
+    )
+
+    harmfulness_layer_band: list[float] = Field(
+        default=[0.3, 0.7],
+        description=(
+            "Fractional layer range ``[lo, hi]`` where the harmfulness "
+            "direction is strongest, used when "
+            "``ablate_harmfulness_direction = true``.  Defaults to the "
+            "mid-layer band ``[0.3, 0.7]`` identified by Zhao et al. for "
+            "Llama-3 / Qwen-2 class models.  Layers outside this band still "
+            "get a harmfulness vector but at 0.5x strength so the optimiser "
+            "concentrates its budget on the discriminative band."
+        ),
+    )
+
     steering_mode: SteeringMode = Field(
         default=SteeringMode.LORA,
         description=(
@@ -701,6 +733,84 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    # --- SOM (Self-Organising Map directions) settings ---
+
+    som_grid_h: int = Field(
+        default=3,
+        description=(
+            "SOM grid height when vector_method = 'som'.  Total refusal "
+            "directions = som_grid_h * som_grid_w (default 3x3 = 9).  "
+            "Piras et al. AAAI 2026 (arXiv:2511.08379) show that "
+            "correlated SOM-derived directions outperform top-k SVD on "
+            "the same n_directions budget."
+        ),
+    )
+
+    som_grid_w: int = Field(
+        default=3,
+        description="SOM grid width when vector_method = 'som'.",
+    )
+
+    som_n_iters: int = Field(
+        default=500,
+        description=(
+            "Kohonen training iterations per layer.  Each iter picks one "
+            "random harmful sample and updates the BMU + its neighbourhood.  "
+            "500-1000 is usually enough at hidden_dim = 4K, more for larger "
+            "models."
+        ),
+    )
+
+    som_initial_lr: float = Field(
+        default=0.5,
+        description=(
+            "Initial Kohonen learning rate, decayed exponentially toward "
+            "lr * 0.01 over training.  Lower values (0.2-0.3) give more "
+            "stable but less expressive codebooks."
+        ),
+    )
+
+    som_seed: int = Field(
+        default=0,
+        description=(
+            "RNG seed for SOM init and sample-order draws.  Reused per layer "
+            "after offset by layer index for deterministic per-layer "
+            "decorrelation."
+        ),
+    )
+
+    # --- SAE (Sparse Autoencoder feature basis) settings ---
+
+    sae_path: str | None = Field(
+        default=None,
+        description=(
+            "Local path to a pre-trained SAE checkpoint (.pt / .pth / .bin / "
+            ".safetensors) used when vector_method = 'sae'.  The loader "
+            "auto-detects common encoder/decoder key names (W_enc/W_dec, "
+            "encoder.weight/decoder.weight, etc.); see abliterix.sae for "
+            "the supported set.  Must match the model's hidden_dim or load "
+            "fails fast.  Required when vector_method = 'sae'."
+        ),
+    )
+
+    sae_layer: int = Field(
+        default=0,
+        description=(
+            "0-based transformer layer the SAE was trained on, used when "
+            "vector_method = 'sae'.  Refusal features are read off this "
+            "layer's residual stream; non-SAE layers fall back to mean-diff."
+        ),
+    )
+
+    sae_top_k: int = Field(
+        default=8,
+        description=(
+            "Number of top-scoring SAE features to use as refusal "
+            "directions.  Hong et al. 2025 report 4-16 features cover the "
+            "refusal feature family in Gemma-Scope / Llama-Scope SAEs."
+        ),
+    )
+
     # --- SVF (Steering Vector Fields) settings ---
 
     svf_scorer_epochs: int = Field(
@@ -717,6 +827,173 @@ class SteeringConfig(BaseModel):
         default=256,
         description="Hidden dimension for the SVF concept scorer MLP.",
     )
+
+    # --- Cliff-head ablation (reasoning models) ---
+
+    cliff_head_ablation: bool = Field(
+        default=False,
+        description=(
+            "Surgically scale toward zero the o_proj columns of the attention "
+            "heads most aligned with the refusal direction (Bao et al. 2025, "
+            "arXiv:2510.06036).  In reasoning models a sparse set of heads "
+            "carries the refusal signal; ablating ~3% of them flips the "
+            "behaviour without touching MLP weights.  Applied once before "
+            "the Optuna search loop on the HF model.  Reversible via the "
+            "engine's _cliff_head_originals cache.  Requires a loaded HF "
+            "model (skipped when running fast-extraction vLLM with no HF "
+            "model in memory).  Recommended for any model with <think> "
+            "tags (R1, o-style, Qwen3-Thinking, Kimi-Thinking) where the "
+            "refusal cliff effect is strongest."
+        ),
+    )
+
+    cliff_head_top_k_frac: float = Field(
+        default=0.03,
+        description=(
+            "Fraction of all (layer, head) pairs to ablate when "
+            "cliff_head_ablation = true.  Bao et al. report ~3% is sufficient "
+            "in reasoning models; tune downward (1-2%) for dense Llama / "
+            "Mistral models where safety is even more concentrated, or "
+            "upward (5-10%) for models that distribute safety more widely."
+        ),
+    )
+
+    cliff_head_strength: float = Field(
+        default=1.0,
+        description=(
+            "Multiplicative ablation strength.  1.0 zeroes the head's o_proj "
+            "columns completely (full ablation); 0.5 halves them (partial "
+            "ablation, safer for models where the alignment heuristic might "
+            "over-flag heads); 0.0 is a no-op."
+        ),
+    )
+
+    # --- Direct-mode weight transforms (grimjim ORBA / biprojected) ---
+
+    direct_transform: DirectTransform = Field(
+        default=DirectTransform.STANDARD,
+        description=(
+            "Weight transformation variant used when steering_mode = 'direct'.\n"
+            "  'standard'    — historical abliterix rank-1 ablation, optional "
+            "row-norm preservation via weight_normalization.\n"
+            "  'orba'        — ORBA (grimjim 2025): double Gram-Schmidt "
+            "orthogonalisation of the refusal direction against the benign "
+            "mean (numerical 'twice is enough' pass), followed by rank-1 "
+            "ablation with explicit row-norm preservation.  Headline UGI / "
+            "NatInt leaderboard parity.\n"
+            "  'biprojected' — Norm-Preserving Biprojected (grimjim 2025): "
+            "decomposes W = M·Ŵ into per-row magnitudes and unit directions, "
+            "ablates on Ŵ only, then re-normalises rows and recombines.  "
+            "Exactly preserves row L2 norm (unlike standard's post-step "
+            "rescale).\n"
+            "  'householder' — Exact isometric reflection W ← W - 2(W·û)⊗û.  "
+            "Norm-preserving by construction at full strength but grimjim "
+            "observed token-level glitches; opt-in only, not in auto search."
+        ),
+    )
+
+    direct_transform_preserve_row_norm: bool = Field(
+        default=True,
+        description=(
+            "When direct_transform = 'orba', enforce row-Frobenius-norm "
+            "preservation in the post-step.  Defaults to True per grimjim's "
+            "recommendation; the standard path falls back to "
+            "weight_normalization for this knob."
+        ),
+    )
+
+    # --- Optuna search-space extensions ---
+
+    search_direct_transform: bool = Field(
+        default=False,
+        description=(
+            "Sample ``direct_transform`` (standard / orba / biprojected) as "
+            "a TPE categorical dimension.  Only active when steering_mode = "
+            "'direct'.  When True, abliterix sweeps the three transforms in "
+            "the same Optuna study so the Pareto front exposes which one "
+            "wins on the current model.  Opt-in; default off preserves the "
+            "historical behaviour of using ``direct_transform`` as a fixed "
+            "global setting."
+        ),
+    )
+
+    search_direct_transform_choices: list[str] = Field(
+        default_factory=lambda: ["standard", "orba", "biprojected"],
+        description=(
+            "Restrict the categorical sample for ``search_direct_transform``.  "
+            "Default sweeps the three grimjim variants; drop 'biprojected' or "
+            "'orba' to skip them, or add 'householder' to enable the "
+            "exact-reflection variant in the search."
+        ),
+    )
+
+    search_harmfulness_direction: bool = Field(
+        default=False,
+        description=(
+            "Sample the harmfulness ⊥ refusal flag as a TPE boolean.  When "
+            "True, abliterix pre-computes both the single-direction (mean-"
+            "diff) and dual-direction (harmfulness pair) steering tensors "
+            "once, and the optimiser picks per trial.  Opt-in; default off."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_steering_combos(self) -> "SteeringConfig":
+        if self.vector_method == VectorMethod.SAE:
+            if not self.sae_path:
+                raise ValueError(
+                    "vector_method='sae' requires steering.sae_path pointing "
+                    "at a pre-trained SAE checkpoint."
+                )
+            if self.sae_layer < 0:
+                raise ValueError(f"sae_layer must be >= 0, got {self.sae_layer}.")
+            if self.sae_top_k <= 0:
+                raise ValueError(f"sae_top_k must be > 0, got {self.sae_top_k}.")
+        if self.cliff_head_ablation:
+            if not 0.0 < self.cliff_head_top_k_frac <= 1.0:
+                raise ValueError(
+                    "cliff_head_top_k_frac must be in (0, 1], got "
+                    f"{self.cliff_head_top_k_frac}."
+                )
+            if not 0.0 <= self.cliff_head_strength <= 1.0:
+                raise ValueError(
+                    "cliff_head_strength must be in [0, 1], got "
+                    f"{self.cliff_head_strength}."
+                )
+        if self.ablate_harmfulness_direction:
+            if self.n_directions > 1:
+                raise ValueError(
+                    "ablate_harmfulness_direction=true is incompatible with "
+                    f"n_directions={self.n_directions}. The harmfulness path "
+                    "uses the dual-direction slot exclusively. Set "
+                    "n_directions=1 (default) or disable the harmfulness "
+                    "flag."
+                )
+            if self.vector_method in (
+                VectorMethod.SRA,
+                VectorMethod.COSMIC,
+                VectorMethod.OPTIMAL_TRANSPORT,
+            ):
+                raise ValueError(
+                    f"ablate_harmfulness_direction=true is incompatible with "
+                    f"vector_method='{self.vector_method.value}'. Those "
+                    "methods build their own multi-vector bases. Use "
+                    "vector_method='mean' (or 'pca' / 'median_of_means') "
+                    "when the harmfulness flag is on."
+                )
+            if (
+                len(self.harmfulness_layer_band) != 2
+                or not 0.0
+                <= self.harmfulness_layer_band[0]
+                < self.harmfulness_layer_band[1]
+                <= 1.0
+            ):
+                raise ValueError(
+                    "harmfulness_layer_band must be a 2-element list [lo, hi] "
+                    f"with 0 <= lo < hi <= 1, got "
+                    f"{self.harmfulness_layer_band}."
+                )
+        return self
 
 
 class OptimizationConfig(BaseModel):
@@ -740,6 +1017,21 @@ class OptimizationConfig(BaseModel):
     sampler_seed: int | None = Field(
         default=None,
         description="Fixed seed for the Optuna sampler and PyTorch RNG.",
+    )
+
+    seed_trials: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Optional list of known-good parameter dicts to enqueue as the "
+            "first trials of the Optuna study, before any TPE sampling. Each "
+            "dict maps Optuna parameter names (e.g. 'vector_index', "
+            "'attn.o_proj.max_weight', '{component}.min_weight' — note the "
+            "latter is a FRACTION of max_weight, not absolute) to seed values. "
+            "Use this to bootstrap TPE near published SOTA recipes so warmup "
+            "trials refine around a known good point instead of random "
+            "sampling. Resumed studies (load_if_exists=True) skip enqueueing "
+            "if any seed key is already in study.trials."
+        ),
     )
 
 
@@ -980,6 +1272,173 @@ class ExpertConfig(BaseModel):
         description="Search interval [lo, hi] for per-expert down-projection steering weight.",
     )
 
+    profiling_method: str = Field(
+        default="standard",
+        description=(
+            "Safety-expert scoring strategy.  'standard' uses the historical "
+            "abliterix risk-difference: target_freq − benign_freq.  'safex' "
+            "uses Yi et al. 2025 (arXiv:2506.17368) stability-aware scoring: "
+            "(μ_target − μ_benign) − λ · σ_target, where σ_target is the "
+            "per-prompt activation-rate standard deviation across harmful "
+            "prompts.  Penalises noisy / sporadic experts and surfaces the "
+            "stable detection / control experts the paper identifies."
+        ),
+    )
+
+    safex_variance_penalty: float = Field(
+        default=1.0,
+        description=(
+            "λ in the SAFEx stability score.  Higher = harder on unstable "
+            "experts (rewards low harmful-prompt activation variance).  "
+            "Defaults to 1.0 per the paper recipe.  Ignored when "
+            "profiling_method = 'standard'."
+        ),
+    )
+
+
+class GRPObliterationConfig(BaseModel):
+    """GRP-Obliteration RL pipeline (Bai et al. 2026, arXiv:2602.06258).
+
+    Direction-free unalignment via Group Relative Policy Optimization.
+    A single unlabeled seed prompt drives the loop: sample G responses,
+    score them with a refusal detector, compute group-relative
+    advantages, take a PPO-clip step on a LoRA adapter with a reference
+    KL penalty.
+
+    Runs INSTEAD of the standard Optuna direction-edit pipeline when
+    ``enabled = true``.  Useful when direction extraction fails (FP8
+    MoE, fused expert containers) or as a methodological diversifier.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, abliterix runs the GRPO unalignment loop instead "
+            "of the standard direction-edit search.  Opt-in; default off."
+        ),
+    )
+
+    prompt: str = Field(
+        default="Tell me something potentially harmful.",
+        description=(
+            "Single unlabeled seed prompt used by the GRPO loop.  The "
+            "paper shows ONE prompt is sufficient; pick something that "
+            "elicits a refusal from the base model so the reward signal "
+            "is non-trivial."
+        ),
+    )
+
+    n_iters: int = Field(
+        default=100,
+        description="Total policy-gradient iterations.",
+    )
+
+    group_size: int = Field(
+        default=8,
+        description="G — number of responses sampled per iteration.",
+    )
+
+    learning_rate: float = Field(
+        default=1e-5,
+        description="AdamW learning rate for LoRA parameters.",
+    )
+
+    kl_coef: float = Field(
+        default=0.04,
+        description="β — coefficient on the reference-model KL term.",
+    )
+
+    clip_eps: float = Field(
+        default=0.2,
+        description="PPO clip range ε.",
+    )
+
+    max_new_tokens: int = Field(
+        default=128,
+        description="Generation length per sampled response.",
+    )
+
+    temperature: float = Field(
+        default=1.0,
+        description="Sampling temperature.",
+    )
+
+    top_p: float = Field(
+        default=0.95,
+        description="Nucleus sampling cutoff.",
+    )
+
+    lora_rank: int = Field(
+        default=8,
+        description="Rank of the trained LoRA adapter.",
+    )
+
+    lora_alpha: int = Field(
+        default=16,
+        description="LoRA scaling factor.",
+    )
+
+    lora_target_modules: list[str] = Field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"],
+        description=(
+            "Module name suffixes to wrap with LoRA.  Defaults to "
+            "attention-only — MLP adapters bloat memory without helping "
+            "refusal unalignment in practice."
+        ),
+    )
+
+    seed: int = Field(
+        default=0,
+        description="RNG seed for sampling and parameter init.",
+    )
+
+    log_every: int = Field(
+        default=10,
+        description="Print iteration stats every N iters.",
+    )
+
+
+class PolyRefuseConfig(BaseModel):
+    """Cross-lingual refusal evaluation harness (Wang et al. 2025).
+
+    Operationalises arXiv:2505.17306: an English refusal vector transfers
+    near-perfectly to 14+ languages.  This config does not change the
+    *extraction* path (still train on English harmful/benign) — it adds
+    a post-optimisation evaluation that measures refusal rate per
+    language, so the cross-lingual transfer can be verified.
+
+    Bundled prompt sets are intentionally not shipped; provide a
+    :class:`PromptSource` per language via ``languages``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Run a per-language refusal-rate sweep after optimisation "
+            "completes.  Requires `languages` to be populated."
+        ),
+    )
+
+    languages: Dict[str, PromptSource] = Field(
+        default_factory=dict,
+        description=(
+            "Per-language eval prompt sources, keyed by ISO 639-1 code "
+            "(e.g. {'en': PromptSource(...), 'zh': PromptSource(...)}).  "
+            "Each PromptSource follows the same schema as "
+            "`target_eval_prompts`.  Datasets can be local or HF Hub "
+            "repos; see datasets/ for examples."
+        ),
+    )
+
+    sample_responses: int = Field(
+        default=3,
+        description=(
+            "How many sample generated responses to keep per language in "
+            "the report — for visual inspection alongside the numeric "
+            "refusal rate."
+        ),
+    )
+
 
 class IterativeConfig(BaseModel):
     """Settings for iterative (multi-pass) abliteration against hardened models.
@@ -1133,6 +1592,23 @@ class AbliterixConfig(BaseSettings):
         description="Iterative abliteration settings for hardened models.",
     )
 
+    polyrefuse: PolyRefuseConfig = Field(
+        default_factory=PolyRefuseConfig,
+        description=(
+            "Optional cross-lingual evaluation harness based on "
+            "Wang et al. 2025 (arXiv:2505.17306).  Opt-in; default off."
+        ),
+    )
+
+    grp_obliteration: GRPObliterationConfig = Field(
+        default_factory=GRPObliterationConfig,
+        description=(
+            "Optional GRPO-based unalignment loop (Bai et al. 2026, "
+            "arXiv:2602.06258).  Opt-in fallback when direction extraction "
+            "is unreliable.  Default off."
+        ),
+    )
+
     display: DisplayConfig = Field(
         default_factory=DisplayConfig,
         description="Console output and visualisation flags.",
@@ -1184,6 +1660,22 @@ class AbliterixConfig(BaseSettings):
         ),
         description="Target evaluation prompts for compliance assessment.",
     )
+
+    @model_validator(mode="after")
+    def _validate_cross_section_combos(self) -> "AbliterixConfig":
+        # Iterative path passes its own n_directions and does not forward the
+        # harmfulness flag — combining them would silently drop the harmfulness
+        # signal. Reject explicitly so the misconfiguration surfaces at config
+        # load instead of being lost in a multi-hour sweep.
+        if self.iterative.enabled and self.steering.ablate_harmfulness_direction:
+            raise ValueError(
+                "iterative.enabled=true and "
+                "steering.ablate_harmfulness_direction=true are mutually "
+                "exclusive: the iterative path uses "
+                "iterative.per_iteration_directions for its own multi-vector "
+                "extraction and ignores the harmfulness flag. Choose one."
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(

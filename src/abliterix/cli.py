@@ -706,6 +706,16 @@ def run():
                 sra_base_method=config.steering.sra_base_method,
                 sra_n_atoms=config.steering.sra_n_atoms,
                 sra_ridge_alpha=config.steering.sra_ridge_alpha,
+                ablate_harmfulness_direction=config.steering.ablate_harmfulness_direction,
+                harmfulness_layer_band=tuple(config.steering.harmfulness_layer_band),
+                som_grid_h=config.steering.som_grid_h,
+                som_grid_w=config.steering.som_grid_w,
+                som_n_iters=config.steering.som_n_iters,
+                som_initial_lr=config.steering.som_initial_lr,
+                som_seed=config.steering.som_seed,
+                sae_path=config.steering.sae_path,
+                sae_layer=config.steering.sae_layer,
+                sae_top_k=config.steering.sae_top_k,
             )
 
         analyzer = ResidualAnalyzer(config, engine, benign_states, target_states)
@@ -732,6 +742,56 @@ def run():
             print(
                 f"* Trained scorers for [bold]{len(engine._concept_scorers)}[/] layers"
             )
+
+        # Cliff-head ablation (Bao et al. 2025, arXiv:2510.06036).
+        # Surgically scale toward zero the o_proj columns of the attention
+        # heads most aligned with the refusal direction. Applied once before
+        # the optimizer search, on the HF model. Skipped when running under
+        # the fast-extraction vLLM path that unloads the HF model (cliff-head
+        # editing of vLLM tensors is a separate path not yet implemented).
+        if config.steering.cliff_head_ablation:
+            if engine.model is None:
+                print(
+                    "[yellow]Cliff-head ablation requested but HF model is "
+                    "not loaded — skipping. This typically means the "
+                    "fast-extraction vLLM path is active; cliff-head support "
+                    "for vLLM-only mode is on the roadmap.[/]"
+                )
+            else:
+                from .cliff_head import run_cliff_head_ablation
+
+                print()
+                print(
+                    "Applying cliff-head ablation "
+                    f"(top {config.steering.cliff_head_top_k_frac:.1%}, "
+                    f"strength {config.steering.cliff_head_strength:.2f})..."
+                )
+                n_modified, heads = run_cliff_head_ablation(
+                    engine,
+                    vectors,
+                    top_k_frac=config.steering.cliff_head_top_k_frac,
+                    strength=config.steering.cliff_head_strength,
+                )
+                if n_modified:
+                    by_layer: dict[int, int] = {}
+                    for h in heads:
+                        by_layer[h.layer] = by_layer.get(h.layer, 0) + 1
+                    top_layers = sorted(
+                        by_layer.items(), key=lambda x: x[1], reverse=True
+                    )[:5]
+                    layer_brief = ", ".join(
+                        f"L{layer}×{count}" for layer, count in top_layers
+                    )
+                    print(
+                        f"* Ablated [bold]{n_modified}[/] attention heads "
+                        f"across {len(by_layer)} layers (top: {layer_brief})"
+                    )
+                else:
+                    print(
+                        "[yellow]Cliff-head ablation matched no heads — "
+                        "check num_attention_heads / head_dim divisibility "
+                        "for this architecture.[/]"
+                    )
 
         # Keep residual states if needed for discriminative layer selection
         # or angular steering; otherwise free memory.
@@ -763,7 +823,19 @@ def run():
         ):
             print()
             print("Profiling MoE expert activations...")
-            safety_experts = engine.identify_safety_experts(benign_msgs, target_msgs)
+            if config.experts.profiling_method == "safex":
+                from .safex import identify_safety_experts_safex
+
+                safety_experts = identify_safety_experts_safex(
+                    engine,
+                    benign_msgs,
+                    target_msgs,
+                    variance_penalty=config.experts.safex_variance_penalty,
+                )
+            else:
+                safety_experts = engine.identify_safety_experts(
+                    benign_msgs, target_msgs
+                )
 
         # ----- TP backend: Phase transition (vLLM or SGLang) -----
         tp_gen = None
@@ -1070,6 +1142,35 @@ def run():
                     f"(would be ~100x slower).  Fix the backend installation and retry."
                 )
 
+        # Precompute alternative steering tensors when the optimiser is
+        # asked to search the harmfulness ⊥ refusal flag as a categorical.
+        # The pair-variant uses the existing harmfulness extractor and
+        # plugs into the multi-direction code path downstream.
+        _vector_variants: dict | None = None
+        if (
+            config.steering.search_harmfulness_direction
+            and benign_states is not None
+            and target_states is not None
+        ):
+            from .harmfulness import extract_harm_refusal_pair
+
+            print()
+            print(
+                "Precomputing harmfulness-pair variant for the optimiser "
+                "(search_harmfulness_direction=true)..."
+            )
+            pair_vectors = extract_harm_refusal_pair(
+                benign_states,
+                target_states,
+                layer_band=tuple(config.steering.harmfulness_layer_band),
+                orthogonal_projection=config.steering.orthogonal_projection,
+                projected_abliteration=config.steering.projected_abliteration,
+            )
+            _vector_variants = {
+                "single": vectors,
+                "harmfulness_pair": pair_vectors,
+            }
+
         study = run_search(
             config,
             engine,
@@ -1079,6 +1180,7 @@ def run():
             storage,
             benign_states=benign_states,
             target_states=target_states,
+            steering_vector_variants=_vector_variants,
         )
 
         if config.non_interactive:

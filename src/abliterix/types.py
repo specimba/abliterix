@@ -24,6 +24,8 @@ class VectorMethod(str, Enum):
     OPTIMAL_TRANSPORT = "optimal_transport"
     COSMIC = "cosmic"
     SRA = "sra"
+    SOM = "som"
+    SAE = "sae"
 
 
 class DecayKernel(str, Enum):
@@ -46,6 +48,20 @@ class WeightNorm(str, Enum):
     PRE = "pre"
     # POST = "post"  # Theoretically valid but empirically useless.
     FULL = "full"
+
+
+class DirectTransform(str, Enum):
+    """Direct-mode weight transformation variants.
+
+    Only consulted when ``steering_mode = "direct"``.  Mirrored from
+    :class:`abliterix.weight_transforms.DirectTransform` so the config
+    surface lives next to every other enum.  See that module for the math.
+    """
+
+    STANDARD = "standard"
+    ORBA = "orba"
+    BIPROJECTED = "biprojected"
+    HOUSEHOLDER = "householder"
 
 
 class PromptSource(BaseModel):
