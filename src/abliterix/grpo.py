@@ -283,14 +283,22 @@ def ppo_clip_loss(
     """
     ratio = (log_probs_new - log_probs_ref).exp()  # (B, T)
     adv = advantages.unsqueeze(-1)  # (B, 1)
-    surr_1 = ratio * adv
-    surr_2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv
-    # torch.minimum (explicit elementwise) instead of torch.min — on
-    # torch ≤ 2.11 the two-tensor overload of torch.min sometimes returns
-    # a non-grad-tracking tensor when surr_1 == surr_2 bit-identically
-    # (which happens whenever ratio sits strictly inside the clip window,
-    # since clamp is a no-op there). torch.minimum has consistent autograd.
-    per_token_policy = -torch.minimum(surr_1, surr_2)
+
+    # Equivalent rewrite of -min(r·A, clip(r)·A) using torch.where instead of
+    # torch.min / torch.minimum. The two-tensor min variants lose grad_fn on
+    # torch ≤ 2.11 when the inputs are bit-identical, which happens whenever
+    # ratio sits inside the clip window (clamp is a no-op there → surr_1 ==
+    # surr_2 exactly). Case analysis of -min(r·A, clip(r)·A):
+    #   * adv > 0, ratio > 1 + eps   → clipped wins   → effective = 1 + eps
+    #   * adv < 0, ratio < 1 - eps   → clipped wins   → effective = 1 - eps
+    #   * any other case             → unclipped wins → effective = ratio
+    upper_clip = (adv > 0) & (ratio > 1.0 + clip_eps)
+    lower_clip = (adv < 0) & (ratio < 1.0 - clip_eps)
+    upper_val = torch.full_like(ratio, 1.0 + clip_eps)
+    lower_val = torch.full_like(ratio, 1.0 - clip_eps)
+    effective_ratio = torch.where(upper_clip, upper_val, ratio)
+    effective_ratio = torch.where(lower_clip, lower_val, effective_ratio)
+    per_token_policy = -effective_ratio * adv
 
     per_token_kl = log_probs_new - log_probs_ref  # token-level KL in [-inf, inf]
 
