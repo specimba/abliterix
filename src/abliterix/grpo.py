@@ -284,20 +284,25 @@ def ppo_clip_loss(
     ratio = (log_probs_new - log_probs_ref).exp()  # (B, T)
     adv = advantages.unsqueeze(-1)  # (B, 1)
 
-    # Equivalent rewrite of -min(r·A, clip(r)·A) using torch.where instead of
-    # torch.min / torch.minimum. The two-tensor min variants lose grad_fn on
-    # torch ≤ 2.11 when the inputs are bit-identical, which happens whenever
-    # ratio sits inside the clip window (clamp is a no-op there → surr_1 ==
-    # surr_2 exactly). Case analysis of -min(r·A, clip(r)·A):
+    # Equivalent rewrite of -min(r·A, clip(r)·A) using a mask-arithmetic
+    # selector instead of torch.min / torch.minimum / torch.where. The min
+    # variants lose grad_fn on torch ≤ 2.11 whenever the two surrogates are
+    # bit-identical (the common case — inside the clip window the clamp is a
+    # no-op so surr_1 == surr_2 exactly). torch.where exhibits a similar
+    # regression on torch 2.11 + Python 3.12 in CI. A pure mul/add expression
+    # uses only ops with well-tested autograd across all torch versions.
+    # Case analysis of -min(r·A, clip(r)·A):
     #   * adv > 0, ratio > 1 + eps   → clipped wins   → effective = 1 + eps
     #   * adv < 0, ratio < 1 - eps   → clipped wins   → effective = 1 - eps
     #   * any other case             → unclipped wins → effective = ratio
-    upper_clip = (adv > 0) & (ratio > 1.0 + clip_eps)
-    lower_clip = (adv < 0) & (ratio < 1.0 - clip_eps)
-    upper_val = torch.full_like(ratio, 1.0 + clip_eps)
-    lower_val = torch.full_like(ratio, 1.0 - clip_eps)
-    effective_ratio = torch.where(upper_clip, upper_val, ratio)
-    effective_ratio = torch.where(lower_clip, lower_val, effective_ratio)
+    upper_mask = ((adv > 0) & (ratio > 1.0 + clip_eps)).to(ratio.dtype)
+    lower_mask = ((adv < 0) & (ratio < 1.0 - clip_eps)).to(ratio.dtype)
+    no_clip_mask = 1.0 - upper_mask - lower_mask
+    effective_ratio = (
+        no_clip_mask * ratio
+        + upper_mask * (1.0 + clip_eps)
+        + lower_mask * (1.0 - clip_eps)
+    )
     per_token_policy = -effective_ratio * adv
 
     per_token_kl = log_probs_new - log_probs_ref  # token-level KL in [-inf, inf]
