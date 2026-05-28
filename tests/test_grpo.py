@@ -133,7 +133,13 @@ def test_ppo_loss_respects_response_mask():
 
 def test_ppo_loss_gradient_wrt_log_probs_new():
     """Loss must be differentiable w.r.t. the policy log-probs."""
-    log_new = torch.zeros(2, 4, requires_grad=True)
+    # Slight perturbation (instead of pure zeros) so log_probs_new differs from
+    # log_probs_ref. With log_new == log_ref exactly, ratio = 1.0 hits both
+    # surr_1 == surr_2 and the clamp boundary, breaking torch.min's autograd
+    # graph on torch<=2.11 with "element 0 of tensors does not require grad".
+    # Real training never sees this degenerate case; the test just needs a
+    # gradient check.
+    log_new = torch.full((2, 4), 0.05, requires_grad=True)
     log_ref = torch.zeros(2, 4)
     advantages = torch.tensor([0.7, -0.3])
     loss, _ = ppo_clip_loss(
@@ -145,14 +151,11 @@ def test_ppo_loss_gradient_wrt_log_probs_new():
     )
     loss.backward()
     assert log_new.grad is not None
-    # With zero ratios, the surrogate is just advantage * ratio = advantage; the
-    # gradient should point in the direction that increases the advantage-weighted
-    # log-prob. So negative advantage → positive gradient on log_new (we want
-    # to DECREASE log_new for response 1).
+    # log_new > log_ref → ratio > 1 (still inside the clamp window). Surrogate
+    # is advantage * ratio. Positive advantage → loss = -A·ratio wants ratio UP
+    # → wants log_new UP → grad < 0. Negative advantage flips the sign.
     grad_response_0 = log_new.grad[0].mean().item()
     grad_response_1 = log_new.grad[1].mean().item()
-    # Response 0 has positive advantage → loss = -A · 1 (wants log_new to go UP) → grad < 0
-    # Response 1 has negative advantage → grad > 0
     assert grad_response_0 < 0
     assert grad_response_1 > 0
 
