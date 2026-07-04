@@ -224,6 +224,19 @@ def compute_steering_vectors(
         ``(n_dirs, layers+1, dim)``.
     """
 
+    # --- RDO is engine-based, not a pure function of cached states ---
+    # It requires forward+backward through the model, so it is routed
+    # separately (see abliterix.rdo.optimize_rdo_direction, invoked from the
+    # CLI where the engine and prompts are available).  Guard here so a stray
+    # method='rdo' fails loudly instead of silently falling through to MEAN.
+    if method == VectorMethod.RDO:
+        raise ValueError(
+            "vector_method='rdo' cannot be computed from cached residual "
+            "states alone — it learns the direction by back-propagating "
+            "through the model. Use abliterix.rdo.optimize_rdo_direction "
+            "(the CLI routes this automatically)."
+        )
+
     # --- Joint harmfulness + refusal direction (Zhao et al. 2025) ---
     # Routed before multi-direction because it reuses the same stacked
     # output layout (n_dirs=2) but with a semantic decomposition that does

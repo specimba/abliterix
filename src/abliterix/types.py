@@ -26,6 +26,7 @@ class VectorMethod(str, Enum):
     SRA = "sra"
     SOM = "som"
     SAE = "sae"
+    RDO = "rdo"
 
 
 class DecayKernel(str, Enum):

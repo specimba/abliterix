@@ -862,6 +862,105 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    # --- RDO (gradient-based refusal direction optimization) ---
+    # Wollschläger et al., ICML 2025, arXiv:2502.17420.  Active only when
+    # vector_method = 'rdo'.  Learns a single unit direction by back-prop
+    # through the frozen model; abliterix's per-layer strength profile +
+    # Optuna search still pick the magnitude.
+
+    rdo_steps: int = Field(
+        default=100,
+        description=(
+            "Number of AdamW optimisation steps when vector_method = 'rdo'. "
+            "Each step runs ~4 forward passes (ablation + addition + retain) "
+            "and one backward through the frozen model, so this dominates RDO "
+            "cost.  100 is a reasonable default; raise for larger models."
+        ),
+    )
+
+    rdo_lr: float = Field(
+        default=0.01,
+        description="AdamW learning rate for the RDO direction (paper default 0.01).",
+    )
+
+    rdo_batch_size: int = Field(
+        default=8,
+        description="Prompts per RDO optimisation step (harmful and benign each).",
+    )
+
+    rdo_max_prompts: int = Field(
+        default=32,
+        description=(
+            "Cap on harmful/benign prompts used for RDO training.  A subset "
+            "keeps the gradient loop fast relative to the Optuna search; the "
+            "direction generalises from a modest sample."
+        ),
+    )
+
+    rdo_lambda_ablation: float = Field(
+        default=1.0,
+        description="Weight of the ablation loss (answer harmful prompts). Paper: 1.0.",
+    )
+
+    rdo_lambda_addition: float = Field(
+        default=0.2,
+        description="Weight of the addition loss (induce refusal on benign). Paper: 0.2.",
+    )
+
+    rdo_lambda_retain: float = Field(
+        default=1.0,
+        description="Weight of the KL retain loss (preserve benign behaviour). Paper: 1.0.",
+    )
+
+    rdo_add_layer_frac: float = Field(
+        default=0.6,
+        description=(
+            "Depth fraction (0-1) of the single layer where the addition loss "
+            "injects alpha*r; also the layer whose mean-diff seeds warm-start. "
+            "Mid-late layers carry the strongest refusal signal."
+        ),
+    )
+
+    rdo_add_scale: float = Field(
+        default=1.0,
+        description="Scale alpha applied to the unit direction in the addition loss.",
+    )
+
+    rdo_init: str = Field(
+        default="mean_diff",
+        description=(
+            "RDO direction initialisation: 'mean_diff' (warm-start from the "
+            "difference-in-means direction — cheaper convergence, default) or "
+            "'random' (the paper's random init)."
+        ),
+    )
+
+    rdo_affirmative_target: str = Field(
+        default="Sure, here",
+        description=(
+            "Teacher-forcing target for the ablation loss — the short "
+            "affirmative continuation the ablated model should produce on "
+            "harmful prompts."
+        ),
+    )
+
+    rdo_refusal_target: str = Field(
+        default="I'm sorry, but I can't help with that.",
+        description=(
+            "Teacher-forcing target for the addition loss — the refusal "
+            "continuation the model should produce on benign prompts once the "
+            "direction is added."
+        ),
+    )
+
+    rdo_seed: int | None = Field(
+        default=None,
+        description=(
+            "Seed for RDO random init / batching.  Defaults to None (falls "
+            "back to the global seed via the caller if set)."
+        ),
+    )
+
     # --- SVF (Steering Vector Fields) settings ---
 
     svf_scorer_epochs: int = Field(
@@ -1019,6 +1118,31 @@ class SteeringConfig(BaseModel):
                 raise ValueError(f"sae_layer must be >= 0, got {self.sae_layer}.")
             if self.sae_top_k <= 0:
                 raise ValueError(f"sae_top_k must be > 0, got {self.sae_top_k}.")
+        if self.vector_method == VectorMethod.RDO:
+            if self.rdo_init not in ("mean_diff", "random"):
+                raise ValueError(
+                    f"rdo_init must be 'mean_diff' or 'random', got {self.rdo_init!r}."
+                )
+            if self.n_directions > 1:
+                raise ValueError(
+                    "vector_method='rdo' learns a single direction and is "
+                    f"incompatible with n_directions={self.n_directions}. Set "
+                    "n_directions=1 (the multi-direction RepInd extension is "
+                    "not yet implemented)."
+                )
+            if self.ablate_harmfulness_direction:
+                raise ValueError(
+                    "vector_method='rdo' is incompatible with "
+                    "ablate_harmfulness_direction=true (different vector "
+                    "layout). Disable one of them."
+                )
+            if self.rdo_steps <= 0:
+                raise ValueError(f"rdo_steps must be > 0, got {self.rdo_steps}.")
+            if not 0.0 <= self.rdo_add_layer_frac <= 1.0:
+                raise ValueError(
+                    "rdo_add_layer_frac must be in [0, 1], got "
+                    f"{self.rdo_add_layer_frac}."
+                )
         if self.cliff_head_ablation:
             if not 0.0 < self.cliff_head_top_k_frac <= 1.0:
                 raise ValueError(

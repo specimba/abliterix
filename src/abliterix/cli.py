@@ -41,7 +41,7 @@ from .eval.scorer import TrialScorer
 from .interactive import show_interactive_results
 from .optimizer import run_search
 from .settings import AbliterixConfig
-from .types import ChatMessage
+from .types import ChatMessage, VectorMethod
 from .util import (
     ask_choice,
     flush_memory,
@@ -786,6 +786,13 @@ def run():
         print(f"* Vector method: [bold]{config.steering.vector_method.value}[/]")
 
         if config.iterative.enabled:
+            if config.steering.vector_method == VectorMethod.RDO:
+                raise ValueError(
+                    "vector_method='rdo' is incompatible with iterative "
+                    "abliteration (the iterative loop re-extracts directions "
+                    "from cached states each round and has no RDO wiring). "
+                    "Disable iterative.enabled to use RDO."
+                )
             from .iterative import iterative_abliterate
 
             vectors, iter_stats = iterative_abliterate(
@@ -804,6 +811,17 @@ def run():
                 )
                 benign_states = engine.extract_hidden_states_batched(benign_msgs)
                 target_states = engine.extract_hidden_states_batched(target_msgs)
+        elif config.steering.vector_method == VectorMethod.RDO:
+            from .rdo import optimize_rdo_direction
+
+            vectors = optimize_rdo_direction(
+                engine,
+                target_msgs,
+                benign_msgs,
+                config,
+                benign_states=benign_states,
+                target_states=target_states,
+            )
         else:
             vectors = compute_steering_vectors(
                 benign_states,
